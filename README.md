@@ -37,16 +37,25 @@ Translated FR subtitles are stored by silo as subtitle-provider subtitles in its
 |---------|-------|
 | `subextractor_url` | Base URL of SubExtractor, e.g. `http://subextractor:8975` (plain HTTP allowed only for private/local hosts) |
 | `subextractor_api_key` | The `WEB_UI_API_KEY` of the SubExtractor instance |
-| `webhook_secret` | Same value as SubExtractor's `SILO_WEBHOOK_SECRET` |
+| `webhook_secret` | Same value as SubExtractor's `SILO_WEBHOOK_SECRET` (acts as secret id `default`) |
+| `webhook_secrets` | Optional JSON object mapping secret id → secret for multiple silo webhook registrations, e.g. `{"subex": "whsec_..."}`. Entries take precedence over `webhook_secret` for matching ids |
 
-5. Copy the **webhook URL** shown on the plugin's admin page (it looks like `https://<silo>/plugins/<id>/webhook`).
-6. In silo, go to **Settings → Notifications → Webhooks**, add a webhook with that URL, and enable **Ratings**.
+5. Copy the **webhook URL** shown on the plugin's admin page. It has the form:
+
+   ```
+   https://<silo-host>/plugins/<installation_id>/webhook/sig:<secretId>/ts:<unix-epoch>/v1:<hex>
+   ```
+
+   Silo's plugin proxy forwards only a fixed header whitelist and drops `X-Silo-Signature`, so the signature components ride in the path. The HMAC still validates `epoch.body` (silo signs only the body, never the URL), so path rewriting is safe. Regenerate the URL when re-registering the webhook.
+
+6. In silo, go to **Settings → Notifications → Webhooks**, add a webhook with that URL, and enable **Ratings**. Use a custom secret id from `webhook_secrets` (e.g. `sig:subex`) if you registered more than one webhook.
 
 ## Routes
 
 | Path | Method | Access | Purpose |
 |------|--------|--------|---------|
-| `/webhook` | POST | public | Receives signed `rating.set` deliveries; verifies HMAC, dedupes, ACKs fast, processes async |
+| `/webhook/*` | POST | public | Receives signed `rating.set` deliveries; signature components ride in the path (`/webhook/sig:<secretId>/ts:<epoch>/v1:<hex>`); verifies HMAC, dedupes, ACKs fast, processes async |
+| `/webhook` | POST | public | Exact path without signature tokens → 400 with a hint (fails fast so misconfiguration is visible) |
 | `/status` | GET | admin | JSON `{"version": ..., "configured": bool}` |
 | `/admin/auto-translate` | GET | admin | Self-contained admin page showing status + webhook URL |
 

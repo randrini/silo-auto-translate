@@ -16,12 +16,15 @@ import (
 	pb "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 )
 
-func sign(secret string, timestamp int64, body []byte) string {
+// signPath builds the HMAC digest over "<epoch>.<body>" and returns the full
+// signed webhook path: /webhook/sig:<secretId>/ts:<epoch>/v1:<hex>.
+func signPath(secretID, secret string, epoch int64, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(strconv.FormatInt(timestamp, 10)))
+	mac.Write([]byte(strconv.FormatInt(epoch, 10)))
 	mac.Write([]byte{'.'})
 	mac.Write(body)
-	return fmt.Sprintf("t=%d,v1=%s", timestamp, hex.EncodeToString(mac.Sum(nil)))
+	digest := hex.EncodeToString(mac.Sum(nil))
+	return fmt.Sprintf("%s/sig:%s/ts:%d/v1:%s", webhookPath, secretID, epoch, digest)
 }
 
 func ratingBody(itemID string) []byte {
@@ -50,14 +53,13 @@ func newTestRoutes(secret string) *webhookRoutes {
 	return newWebhookRoutes(server)
 }
 
-func TestWebhookValidSignatureAccepted(t *testing.T) {
+func TestWebhookValidSignatureInPathAccepted(t *testing.T) {
 	routes := newTestRoutes("secret")
 	body := ratingBody("item-1")
 	req := &pb.HandleHTTPRequest{
-		Method:  "POST",
-		Path:    webhookPath,
-		Body:    body,
-		Headers: map[string]string{webhookHeader: sign("secret", time.Now().Unix(), body)},
+		Method: "POST",
+		Path:   signPath("default", "secret", time.Now().Unix(), body),
+		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
 	if err != nil {
@@ -78,15 +80,51 @@ func TestWebhookValidSignatureAccepted(t *testing.T) {
 	}
 }
 
-func TestWebhookInvalidSignatureRejected(t *testing.T) {
+func TestWebhookCustomSecretIDFromWebhookSecrets(t *testing.T) {
+	server := &runtimeServer{config: &pluginConfig{
+		SubextractorURL:    "http://subextractor:8975",
+		SubextractorAPIKey: "test-key",
+		WebhookSecret:      "default-secret",
+		WebhookSecrets:     map[string]string{"subex": "custom-secret"},
+	}}
+	routes := newWebhookRoutes(server)
+	body := ratingBody("item-1")
+	req := &pb.HandleHTTPRequest{
+		Method: "POST",
+		Path:   signPath("subex", "custom-secret", time.Now().Unix(), body),
+		Body:   body,
+	}
+	resp, err := routes.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", resp.StatusCode, string(resp.Body))
+	}
+}
+
+func TestWebhookUnknownSecretIDRejected(t *testing.T) {
 	routes := newTestRoutes("secret")
 	body := ratingBody("item-1")
 	req := &pb.HandleHTTPRequest{
-		Method:  "POST",
-		Path:    webhookPath,
-		Body:    body,
-		Headers: map[string]string{webhookHeader: sign("wrong-secret", time.Now().Unix(), body)},
+		Method: "POST",
+		Path:   signPath("nope", "secret", time.Now().Unix(), body),
+		Body:   body,
 	}
+	resp, err := routes.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestWebhookInvalidDigestRejected(t *testing.T) {
+	routes := newTestRoutes("secret")
+	body := ratingBody("item-1")
+	path := signPath("default", "wrong-secret", time.Now().Unix(), body)
+	req := &pb.HandleHTTPRequest{Method: "POST", Path: path, Body: body}
 	resp, err := routes.Handle(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Handle error: %v", err)
@@ -101,10 +139,9 @@ func TestWebhookExpiredTimestampRejected(t *testing.T) {
 	body := ratingBody("item-1")
 	old := time.Now().Add(-10 * time.Minute).Unix()
 	req := &pb.HandleHTTPRequest{
-		Method:  "POST",
-		Path:    webhookPath,
-		Body:    body,
-		Headers: map[string]string{webhookHeader: sign("secret", old, body)},
+		Method: "POST",
+		Path:   signPath("default", "secret", old, body),
+		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
 	if err != nil {
@@ -115,14 +152,59 @@ func TestWebhookExpiredTimestampRejected(t *testing.T) {
 	}
 }
 
+func TestWebhookMalformedPathRejected(t *testing.T) {
+	routes := newTestRoutes("secret")
+	body := ratingBody("item-1")
+	now := time.Now().Unix()
+	cases := []string{
+		webhookPath + "/ts:" + strconv.FormatInt(now, 10) + "/v1:deadbeef", // missing sig
+		webhookPath + "/sig:default/v1:deadbeef",                            // missing ts
+		webhookPath + "/sig:default/ts:abc/v1:deadbeef",                     // bad ts
+		webhookPath + "/sig:default/ts:" + strconv.FormatInt(now, 10),       // missing v1
+		webhookPath + "/sig:default/ts:" + strconv.FormatInt(now, 10) + "/v1:zz", // bad digest
+	}
+	for _, path := range cases {
+		req := &pb.HandleHTTPRequest{Method: "POST", Path: path, Body: body}
+		resp, err := routes.Handle(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Handle error for %q: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("path %q status = %d, want 400", path, resp.StatusCode)
+		}
+	}
+}
+
+func TestWebhookExactPathReturnsHint(t *testing.T) {
+	routes := newTestRoutes("secret")
+	body := ratingBody("item-1")
+	req := &pb.HandleHTTPRequest{Method: "POST", Path: webhookPath, Body: body}
+	resp, err := routes.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	var payload struct {
+		Error string `json:"error"`
+		Hint  string `json:"hint"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Error != "missing signature token" || !strings.Contains(payload.Hint, "/webhook/sig:") {
+		t.Fatalf("payload = %#v, want missing signature token with hint", payload)
+	}
+}
+
 func TestWebhookWrongTypeIgnored(t *testing.T) {
 	routes := newTestRoutes("secret")
 	body := []byte(`{"type":"media.added","rating":{"rating":8,"item_id":"item-1"}}`)
 	req := &pb.HandleHTTPRequest{
-		Method:  "POST",
-		Path:    webhookPath,
-		Body:    body,
-		Headers: map[string]string{webhookHeader: sign("secret", time.Now().Unix(), body)},
+		Method: "POST",
+		Path:   signPath("default", "secret", time.Now().Unix(), body),
+		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
 	if err != nil {
@@ -146,10 +228,9 @@ func TestWebhookNoItemIDIgnored(t *testing.T) {
 	routes := newTestRoutes("secret")
 	body := []byte(`{"type":"rating.set","rating":{"rating":8,"item_id":""}}`)
 	req := &pb.HandleHTTPRequest{
-		Method:  "POST",
-		Path:    webhookPath,
-		Body:    body,
-		Headers: map[string]string{webhookHeader: sign("secret", time.Now().Unix(), body)},
+		Method: "POST",
+		Path:   signPath("default", "secret", time.Now().Unix(), body),
+		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
 	if err != nil {
@@ -172,12 +253,8 @@ func TestWebhookNoItemIDIgnored(t *testing.T) {
 func TestWebhookDedupeSkipsInflight(t *testing.T) {
 	routes := newTestRoutes("secret")
 	body := ratingBody("item-dup")
-	req := &pb.HandleHTTPRequest{
-		Method:  "POST",
-		Path:    webhookPath,
-		Body:    body,
-		Headers: map[string]string{webhookHeader: sign("secret", time.Now().Unix(), body)},
-	}
+	path := signPath("default", "secret", time.Now().Unix(), body)
+	req := &pb.HandleHTTPRequest{Method: "POST", Path: path, Body: body}
 	// First delivery starts processing.
 	resp, err := routes.Handle(context.Background(), req)
 	if err != nil {
@@ -195,8 +272,8 @@ func TestWebhookDedupeSkipsInflight(t *testing.T) {
 		t.Fatalf("second status = %d, want 200", resp2.StatusCode)
 	}
 	var payload struct {
-		Status      string `json:"status"`
-		Deduplicated bool  `json:"deduplicated"`
+		Status       string `json:"status"`
+		Deduplicated bool   `json:"deduplicated"`
 	}
 	if err := json.Unmarshal(resp2.Body, &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -211,10 +288,9 @@ func TestWebhookNotConfigured(t *testing.T) {
 	routes := newWebhookRoutes(server)
 	body := ratingBody("item-1")
 	req := &pb.HandleHTTPRequest{
-		Method:  "POST",
-		Path:    webhookPath,
-		Body:    body,
-		Headers: map[string]string{webhookHeader: sign("secret", time.Now().Unix(), body)},
+		Method: "POST",
+		Path:   signPath("default", "secret", time.Now().Unix(), body),
+		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
 	if err != nil {
@@ -254,8 +330,8 @@ func TestStatusRequiresAdmin(t *testing.T) {
 	if err := json.Unmarshal(resp2.Body, &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if payload.Version != "0.1.0" || !payload.Configured {
-		t.Fatalf("payload = %#v, want version 0.1.0 configured=true", payload)
+	if payload.Version != "0.1.1" || !payload.Configured {
+		t.Fatalf("payload = %#v, want version 0.1.1 configured=true", payload)
 	}
 }
 
@@ -278,24 +354,26 @@ func TestVerifySignature(t *testing.T) {
 	secret := "s3cret"
 	body := []byte(`{"hello":"world"}`)
 	now := time.Now().Unix()
-	valid := sign(secret, now, body)
-	if !verifySignature(secret, body, valid) {
+	valid := signPath("default", secret, now, body)
+	// Extract the digest from the path and verify.
+	digest := strings.TrimPrefix(strings.Split(valid, "/v1:")[1], "")
+	if !verifySignature(secret, body, now, digest) {
 		t.Fatal("valid signature rejected")
 	}
-	if verifySignature("other", body, valid) {
+	if verifySignature("other", body, now, digest) {
 		t.Fatal("signature with wrong secret accepted")
 	}
-	if verifySignature(secret, []byte(`{"hello":"tampered"}`), valid) {
+	if verifySignature(secret, []byte(`{"hello":"tampered"}`), now, digest) {
 		t.Fatal("signature for tampered body accepted")
 	}
-	if verifySignature(secret, body, "t=abc,v1=deadbeef") {
-		t.Fatal("malformed timestamp accepted")
+	if verifySignature(secret, body, now-1000, digest) {
+		t.Fatal("expired signature accepted")
 	}
-	if verifySignature(secret, body, "v1=deadbeef") {
-		t.Fatal("missing timestamp accepted")
+	if verifySignature(secret, body, now, "deadbeef") {
+		t.Fatal("malformed digest accepted")
 	}
-	if verifySignature(secret, body, "") {
-		t.Fatal("empty header accepted")
+	if verifySignature("", body, now, digest) {
+		t.Fatal("empty secret accepted")
 	}
 }
 

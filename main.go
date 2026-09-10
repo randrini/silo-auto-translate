@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	pb "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
@@ -52,6 +54,11 @@ func (s *runtimeServer) Configure(_ context.Context, request *pb.ConfigureReques
 			SubextractorAPIKey: stringValue(values["subextractor_api_key"]),
 			WebhookSecret:      stringValue(values["webhook_secret"]),
 		}
+		secrets, err := parseWebhookSecrets(values["webhook_secrets"])
+		if err != nil {
+			return nil, err
+		}
+		cfg.WebhookSecrets = secrets
 		if cfg.SubextractorURL == "" || cfg.SubextractorAPIKey == "" || cfg.WebhookSecret == "" {
 			// Accept an empty configure so the plugin starts and the admin
 			// page can show "not configured". The webhook route rejects
@@ -72,6 +79,49 @@ func stringValue(v any) string {
 		return s
 	}
 	return ""
+}
+
+// parseWebhookSecrets decodes the optional webhook_secrets config value: a
+// JSON object mapping secret id → secret (e.g. {"subex": "whsec_..."}).
+// Returns nil when the value is absent or empty.
+func parseWebhookSecrets(v any) (map[string]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	var raw string
+	switch t := v.(type) {
+	case string:
+		raw = strings.TrimSpace(t)
+	case map[string]any:
+		// The host may deliver the textarea value as a decoded object.
+		out := make(map[string]string, len(t))
+		for k, val := range t {
+			s, ok := val.(string)
+			if !ok {
+				return nil, fmt.Errorf("webhook_secrets: value for %q must be a string", k)
+			}
+			out[k] = s
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("webhook_secrets: must be a JSON object string")
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	var out map[string]string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("webhook_secrets: invalid JSON object: %w", err)
+	}
+	for id, secret := range out {
+		if strings.TrimSpace(id) == "" {
+			return nil, fmt.Errorf("webhook_secrets: secret id must not be empty")
+		}
+		if strings.TrimSpace(secret) == "" {
+			return nil, fmt.Errorf("webhook_secrets: secret for id %q must not be empty", id)
+		}
+	}
+	return out, nil
 }
 
 func main() {

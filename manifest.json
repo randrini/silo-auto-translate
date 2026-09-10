@@ -1,6 +1,6 @@
 {
   "plugin_id": "com.randrini.silo-auto-translate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "silo_api_version": "v1",
   "capabilities": [
     {
@@ -15,6 +15,12 @@
       "id": "webhook",
       "method": "POST",
       "path": "/webhook",
+      "access": "public"
+    },
+    {
+      "id": "webhook-signed",
+      "method": "POST",
+      "path": "/webhook/*",
       "access": "public"
     },
     {
@@ -65,7 +71,7 @@
       "key": "subextractor",
       "title": "SubExtractor connection",
       "description": "Connection settings for the SubExtractor instance that performs extraction and translation.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"subextractor_url\":{\"type\":\"string\",\"format\":\"uri\",\"maxLength\":4096},\"subextractor_api_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secret\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"subextractor_url\",\"subextractor_api_key\",\"webhook_secret\"],\"additionalProperties\":false}",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"subextractor_url\":{\"type\":\"string\",\"format\":\"uri\",\"maxLength\":4096},\"subextractor_api_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secret\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secrets\":{\"type\":\"string\",\"maxLength\":16384}},\"required\":[\"subextractor_url\",\"subextractor_api_key\",\"webhook_secret\"],\"additionalProperties\":false}",
       "required": true,
       "admin_form": {
         "fields": [
@@ -89,10 +95,20 @@
           {
             "key": "webhook_secret",
             "label": "Webhook Secret",
-            "description": "Same value as SubExtractor's SILO_WEBHOOK_SECRET. Used to verify the X-Silo-Signature HMAC on every delivery.",
+            "description": "Same value as SubExtractor's SILO_WEBHOOK_SECRET. Used to verify the webhook HMAC when no matching id is present in webhook_secrets (acts as secret id \"default\").",
             "control": "ADMIN_FORM_CONTROL_PASSWORD",
             "required": true,
             "secret": true
+          },
+          {
+            "key": "webhook_secrets",
+            "label": "Additional Webhook Secrets",
+            "description": "Optional JSON object mapping secret id → secret for multiple silo webhook registrations, e.g. {\"subex\": \"whsec_...\"}. Entries take precedence over the default webhook_secret for matching ids.",
+            "control": "ADMIN_FORM_CONTROL_TEXTAREA",
+            "rows": 4,
+            "required": false,
+            "secret": true,
+            "placeholder": "{\"subex\": \"whsec_...\"}"
           }
         ],
         "submit_label": "Save SubExtractor connection"
