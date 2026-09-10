@@ -1,0 +1,102 @@
+{
+  "plugin_id": "com.randrini.silo-auto-translate",
+  "version": "0.1.0",
+  "silo_api_version": "v1",
+  "capabilities": [
+    {
+      "type": "http_routes.v1",
+      "id": "webhook-routes",
+      "display_name": "Auto Translate",
+      "description": "Receives signed rating.set webhooks and triggers SubExtractor to extract and translate subtitles to French."
+    }
+  ],
+  "http_routes": [
+    {
+      "id": "webhook",
+      "method": "POST",
+      "path": "/webhook",
+      "access": "public"
+    },
+    {
+      "id": "status",
+      "method": "GET",
+      "path": "/status",
+      "access": "admin"
+    },
+    {
+      "id": "admin-page",
+      "method": "GET",
+      "path": "/admin/auto-translate",
+      "access": "admin",
+      "navigable": true,
+      "navigation_label": "Auto Translate",
+      "navigation_kind": "admin"
+    }
+  ],
+  "presentation": {
+    "display_name": "Silo Auto Translate",
+    "summary": "Rating a profile item triggers automatic French subtitle extraction and translation via SubExtractor.",
+    "description_markdown": "When a profile rates an item, silo's notification system delivers a signed `rating.set` webhook to this plugin. The plugin verifies the HMAC signature, then asks SubExtractor to download the video, extract and translate its subtitles to French, and upload them back to silo as subtitle-provider subtitles.",
+    "setup_markdown": "Install the plugin, then configure the SubExtractor connection (URL, API key, and the shared webhook secret). Copy the webhook URL shown on the plugin's admin page into **Settings → Notifications → Webhooks** and enable Ratings.",
+    "homepage_url": "https://github.com/randrini/silo-auto-translate",
+    "source_url": "https://github.com/randrini/silo-auto-translate",
+    "support_url": "https://github.com/randrini/silo-auto-translate/issues",
+    "changelog_url": "https://github.com/randrini/silo-auto-translate/releases",
+    "publisher_name": "randrini",
+    "publisher_url": "https://github.com/randrini",
+    "license_spdx": "MIT"
+  },
+  "supported_platforms": [
+    {
+      "os": "linux",
+      "arch": "amd64"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64"
+    },
+    {
+      "os": "darwin",
+      "arch": "arm64"
+    }
+  ],
+  "global_config_schema": [
+    {
+      "key": "subextractor",
+      "title": "SubExtractor connection",
+      "description": "Connection settings for the SubExtractor instance that performs extraction and translation.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"subextractor_url\":{\"type\":\"string\",\"format\":\"uri\",\"maxLength\":4096},\"subextractor_api_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secret\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"subextractor_url\",\"subextractor_api_key\",\"webhook_secret\"],\"additionalProperties\":false}",
+      "required": true,
+      "admin_form": {
+        "fields": [
+          {
+            "key": "subextractor_url",
+            "label": "SubExtractor URL",
+            "description": "Base URL of the SubExtractor instance (e.g. http://subextractor:8975). Plain HTTP is allowed only for private/local hosts.",
+            "control": "ADMIN_FORM_CONTROL_TEXT",
+            "placeholder": "http://subextractor:8975",
+            "required": true,
+            "secret": false
+          },
+          {
+            "key": "subextractor_api_key",
+            "label": "SubExtractor API Key",
+            "description": "The WEB_UI_API_KEY of the SubExtractor instance. Sent as a Bearer token to /api/silo/process.",
+            "control": "ADMIN_FORM_CONTROL_PASSWORD",
+            "required": true,
+            "secret": true
+          },
+          {
+            "key": "webhook_secret",
+            "label": "Webhook Secret",
+            "description": "Same value as SubExtractor's SILO_WEBHOOK_SECRET. Used to verify the X-Silo-Signature HMAC on every delivery.",
+            "control": "ADMIN_FORM_CONTROL_PASSWORD",
+            "required": true,
+            "secret": true
+          }
+        ],
+        "submit_label": "Save SubExtractor connection"
+      }
+    }
+  ]
+}

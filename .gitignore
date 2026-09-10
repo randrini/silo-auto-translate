@@ -1,0 +1,28 @@
+# Build output
+dist/
+bin/
+/silo-auto-translate
+/plugin
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.*
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Environment and editor files
+.env
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Python cache
+scripts/__pycache__/
+__pycache__/
+*.pyc
