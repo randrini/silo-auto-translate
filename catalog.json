@@ -3,7 +3,7 @@
     {
       "manifest": {
         "plugin_id": "com.randrini.silo-auto-translate",
-        "version": "0.1.1",
+        "version": "0.1.2",
         "silo_api_version": "v1",
         "capabilities": [
           {
@@ -104,19 +104,19 @@
         ]
       },
       "repo_url": "https://github.com/randrini/silo-auto-translate",
-      "checksums_url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.1/checksums.txt",
+      "checksums_url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.2/checksums.txt",
       "binaries": {
         "linux/amd64": {
-          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.1/plugin-linux-amd64",
-          "checksum": "12b36e0bb499649c6a393db2080b1cd0865eed16481a6a3079f9140962ae346c"
+          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.2/plugin-linux-amd64",
+          "checksum": "2ef01468635fe9e3f7d5493d45f86f1cc86ac68eb2d8277a64d717a4d58ba23a"
         },
         "linux/arm64": {
-          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.1/plugin-linux-arm64",
-          "checksum": "aeb2ba1f79ae2087350db4a3f25627a60e08732b193f7d6e40c179a44e6aeb33"
+          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.2/plugin-linux-arm64",
+          "checksum": "8c64ad3aa8fd4f73879ba99985f590894e7bffa3abf19fe4f30ae2fd1d3911e0"
         },
         "darwin/arm64": {
-          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.1/plugin-darwin-arm64",
-          "checksum": "2c383df959839bf7417e8bc2a0757f8bcfafdcc3b34792d169b33b0e0c6b0073"
+          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.2/plugin-darwin-arm64",
+          "checksum": "5f5cf280147e6556a19fa8b4dbdba7e9ee55d4f35114c576aa50454f0a1f352d"
         }
       }
     }
