@@ -21,6 +21,12 @@
             "access": "public"
           },
           {
+            "id": "webhook-token",
+            "method": "POST",
+            "path": "/webhook/*",
+            "access": "public"
+          },
+          {
             "id": "status",
             "method": "GET",
             "path": "/status",
@@ -34,6 +40,12 @@
             "navigable": true,
             "navigation_label": "Auto Translate",
             "navigation_kind": "admin"
+          },
+          {
+            "id": "admin-token",
+            "method": "GET",
+            "path": "/admin/auto-translate/token",
+            "access": "admin"
           }
         ],
         "presentation": {
@@ -68,7 +80,7 @@
             "key": "subextractor",
             "title": "SubExtractor connection",
             "description": "Connection settings for the SubExtractor instance that performs extraction and translation.",
-            "json_schema": "{\"type\":\"object\",\"properties\":{\"subextractor_url\":{\"type\":\"string\",\"format\":\"uri\",\"maxLength\":4096},\"subextractor_api_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secret\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096}},\"required\":[\"subextractor_url\",\"subextractor_api_key\",\"webhook_secret\"],\"additionalProperties\":false}",
+            "json_schema": "{\"type\":\"object\",\"properties\":{\"subextractor_url\":{\"type\":\"string\",\"format\":\"uri\",\"maxLength\":4096},\"subextractor_api_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secret\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secrets\":{\"type\":\"string\",\"maxLength\":16384}},\"required\":[\"subextractor_url\",\"subextractor_api_key\",\"webhook_secret\"],\"additionalProperties\":false}",
             "required": true,
             "admin_form": {
               "fields": [
@@ -92,10 +104,20 @@
                 {
                   "key": "webhook_secret",
                   "label": "Webhook Secret",
-                  "description": "Same value as SubExtractor's SILO_WEBHOOK_SECRET. Used to verify the X-Silo-Signature HMAC on every delivery.",
+                  "description": "Same value as SubExtractor's SILO_WEBHOOK_SECRET. Derives the auth token for the webhook URL (acts as secret id \"default\") and verifies the HMAC when the host forwards X-Silo-Signature.",
                   "control": 3,
                   "required": true,
                   "secret": true
+                },
+                {
+                  "key": "webhook_secrets",
+                  "label": "Additional Webhook Secrets",
+                  "description": "Optional JSON object mapping secret id \u2192 secret for multiple silo webhook registrations, e.g. {\"subex\": \"whsec_...\"}. Each id gets its own derived auth token; entries take precedence over the default webhook_secret for matching ids.",
+                  "control": 2,
+                  "rows": 4,
+                  "required": false,
+                  "secret": true,
+                  "placeholder": "{\"subex\": \"whsec_...\"}"
                 }
               ],
               "submit_label": "Save SubExtractor connection"

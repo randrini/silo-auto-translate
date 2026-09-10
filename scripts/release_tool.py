@@ -8,6 +8,7 @@ transformations (checksums + binary URLs for a release tag).
 import sys
 import re
 import json
+import os
 
 SEMVER_REGEX = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -103,6 +104,19 @@ def update_catalog_json(catalog_path: str, tag: str, hashes: dict[str, str]) -> 
 
     ver = tag.lstrip("v")
     plugin = catalog["plugins"][0]
+
+    # Re-embed the repo's current manifest.json so the catalog always carries
+    # the exact manifest shipped in the release binary (routes, capabilities,
+    # config schema, presentation). Only the catalog-specific normalization
+    # below (admin_form control strings -> numeric enum ints) is applied.
+    catalog_dir = os.path.dirname(os.path.abspath(catalog_path))
+    manifest_path = os.path.join(catalog_dir, "manifest.json")
+    if not os.path.isfile(manifest_path):
+        # catalog.json may live in a subdirectory (e.g. scripts/../catalog.json)
+        manifest_path = os.path.join(catalog_dir, "..", "manifest.json")
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    plugin["manifest"] = manifest
     plugin["manifest"]["version"] = ver
     plugin["checksums_url"] = f"https://github.com/{REPO}/releases/download/{tag}/checksums.txt"
 
