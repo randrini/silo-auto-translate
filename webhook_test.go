@@ -16,17 +16,6 @@ import (
 	pb "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 )
 
-// signPath builds the HMAC digest over "<epoch>.<body>" and returns the full
-// signed webhook path: /webhook/sig:<secretId>/ts:<epoch>/v1:<hex>.
-func signPath(secretID, secret string, epoch int64, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(strconv.FormatInt(epoch, 10)))
-	mac.Write([]byte{'.'})
-	mac.Write(body)
-	digest := hex.EncodeToString(mac.Sum(nil))
-	return fmt.Sprintf("%s/sig:%s/ts:%d/v1:%s", webhookPath, secretID, epoch, digest)
-}
-
 func ratingBody(itemID string) []byte {
 	payload := map[string]any{
 		"type": "rating.set",
@@ -44,6 +33,15 @@ func ratingBody(itemID string) []byte {
 	return body
 }
 
+// signHeader builds a Stripe-convention X-Silo-Signature header value.
+func signHeader(secret string, timestamp int64, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(strconv.FormatInt(timestamp, 10)))
+	mac.Write([]byte{'.'})
+	mac.Write(body)
+	return fmt.Sprintf("t=%d,v1=%s", timestamp, hex.EncodeToString(mac.Sum(nil)))
+}
+
 func newTestRoutes(secret string) *webhookRoutes {
 	server := &runtimeServer{config: &pluginConfig{
 		SubextractorURL:    "http://subextractor:8975",
@@ -53,12 +51,12 @@ func newTestRoutes(secret string) *webhookRoutes {
 	return newWebhookRoutes(server)
 }
 
-func TestWebhookValidSignatureInPathAccepted(t *testing.T) {
+func TestWebhookValidTokenAccepted(t *testing.T) {
 	routes := newTestRoutes("secret")
 	body := ratingBody("item-1")
 	req := &pb.HandleHTTPRequest{
 		Method: "POST",
-		Path:   signPath("default", "secret", time.Now().Unix(), body),
+		Path:   webhookPath + "/" + deriveAuthToken("secret"),
 		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
@@ -80,35 +78,12 @@ func TestWebhookValidSignatureInPathAccepted(t *testing.T) {
 	}
 }
 
-func TestWebhookCustomSecretIDFromWebhookSecrets(t *testing.T) {
-	server := &runtimeServer{config: &pluginConfig{
-		SubextractorURL:    "http://subextractor:8975",
-		SubextractorAPIKey: "test-key",
-		WebhookSecret:      "default-secret",
-		WebhookSecrets:     map[string]string{"subex": "custom-secret"},
-	}}
-	routes := newWebhookRoutes(server)
-	body := ratingBody("item-1")
-	req := &pb.HandleHTTPRequest{
-		Method: "POST",
-		Path:   signPath("subex", "custom-secret", time.Now().Unix(), body),
-		Body:   body,
-	}
-	resp, err := routes.Handle(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Handle error: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, body = %s, want 200", resp.StatusCode, string(resp.Body))
-	}
-}
-
-func TestWebhookUnknownSecretIDRejected(t *testing.T) {
+func TestWebhookWrongTokenRejected(t *testing.T) {
 	routes := newTestRoutes("secret")
 	body := ratingBody("item-1")
 	req := &pb.HandleHTTPRequest{
 		Method: "POST",
-		Path:   signPath("nope", "secret", time.Now().Unix(), body),
+		Path:   webhookPath + "/" + deriveAuthToken("wrong-secret"),
 		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
@@ -120,62 +95,7 @@ func TestWebhookUnknownSecretIDRejected(t *testing.T) {
 	}
 }
 
-func TestWebhookInvalidDigestRejected(t *testing.T) {
-	routes := newTestRoutes("secret")
-	body := ratingBody("item-1")
-	path := signPath("default", "wrong-secret", time.Now().Unix(), body)
-	req := &pb.HandleHTTPRequest{Method: "POST", Path: path, Body: body}
-	resp, err := routes.Handle(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Handle error: %v", err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
-	}
-}
-
-func TestWebhookExpiredTimestampRejected(t *testing.T) {
-	routes := newTestRoutes("secret")
-	body := ratingBody("item-1")
-	old := time.Now().Add(-10 * time.Minute).Unix()
-	req := &pb.HandleHTTPRequest{
-		Method: "POST",
-		Path:   signPath("default", "secret", old, body),
-		Body:   body,
-	}
-	resp, err := routes.Handle(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Handle error: %v", err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
-	}
-}
-
-func TestWebhookMalformedPathRejected(t *testing.T) {
-	routes := newTestRoutes("secret")
-	body := ratingBody("item-1")
-	now := time.Now().Unix()
-	cases := []string{
-		webhookPath + "/ts:" + strconv.FormatInt(now, 10) + "/v1:deadbeef", // missing sig
-		webhookPath + "/sig:default/v1:deadbeef",                            // missing ts
-		webhookPath + "/sig:default/ts:abc/v1:deadbeef",                     // bad ts
-		webhookPath + "/sig:default/ts:" + strconv.FormatInt(now, 10),       // missing v1
-		webhookPath + "/sig:default/ts:" + strconv.FormatInt(now, 10) + "/v1:zz", // bad digest
-	}
-	for _, path := range cases {
-		req := &pb.HandleHTTPRequest{Method: "POST", Path: path, Body: body}
-		resp, err := routes.Handle(context.Background(), req)
-		if err != nil {
-			t.Fatalf("Handle error for %q: %v", path, err)
-		}
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("path %q status = %d, want 400", path, resp.StatusCode)
-		}
-	}
-}
-
-func TestWebhookExactPathReturnsHint(t *testing.T) {
+func TestWebhookNoTokenReturnsHint(t *testing.T) {
 	routes := newTestRoutes("secret")
 	body := ratingBody("item-1")
 	req := &pb.HandleHTTPRequest{Method: "POST", Path: webhookPath, Body: body}
@@ -193,8 +113,86 @@ func TestWebhookExactPathReturnsHint(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if payload.Error != "missing signature token" || !strings.Contains(payload.Hint, "/webhook/sig:") {
-		t.Fatalf("payload = %#v, want missing signature token with hint", payload)
+	if payload.Error != "missing auth token" || !strings.Contains(payload.Hint, "/<auth-token>") {
+		t.Fatalf("payload = %#v, want missing auth token with hint", payload)
+	}
+}
+
+func TestWebhookCustomSecretIDTokenWorks(t *testing.T) {
+	server := &runtimeServer{config: &pluginConfig{
+		SubextractorURL:    "http://subextractor:8975",
+		SubextractorAPIKey: "test-key",
+		WebhookSecret:      "default-secret",
+		WebhookSecrets:     map[string]string{"subex": "custom-secret"},
+	}}
+	routes := newWebhookRoutes(server)
+	body := ratingBody("item-1")
+	req := &pb.HandleHTTPRequest{
+		Method: "POST",
+		Path:   webhookPath + "/" + deriveAuthToken("custom-secret"),
+		Body:   body,
+	}
+	resp, err := routes.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", resp.StatusCode, string(resp.Body))
+	}
+}
+
+func TestWebhookHeaderHMACAccepted(t *testing.T) {
+	routes := newTestRoutes("secret")
+	body := ratingBody("item-1")
+	req := &pb.HandleHTTPRequest{
+		Method:  "POST",
+		Path:    webhookPath + "/" + deriveAuthToken("secret"),
+		Body:    body,
+		Headers: map[string]string{webhookHeader: signHeader("secret", time.Now().Unix(), body)},
+	}
+	resp, err := routes.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", resp.StatusCode, string(resp.Body))
+	}
+}
+
+func TestWebhookHeaderHMACInvalidRejected(t *testing.T) {
+	routes := newTestRoutes("secret")
+	body := ratingBody("item-1")
+	req := &pb.HandleHTTPRequest{
+		Method:  "POST",
+		Path:    webhookPath + "/" + deriveAuthToken("secret"),
+		Body:    body,
+		Headers: map[string]string{webhookHeader: signHeader("wrong-secret", time.Now().Unix(), body)},
+	}
+	resp, err := routes.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestWebhookHeaderHMACExpiredRejected(t *testing.T) {
+	routes := newTestRoutes("secret")
+	body := ratingBody("item-1")
+	old := time.Now().Add(-10 * time.Minute).Unix()
+	req := &pb.HandleHTTPRequest{
+		Method:  "POST",
+		Path:    webhookPath + "/" + deriveAuthToken("secret"),
+		Body:    body,
+		Headers: map[string]string{webhookHeader: signHeader("secret", old, body)},
+	}
+	resp, err := routes.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 }
 
@@ -203,7 +201,7 @@ func TestWebhookWrongTypeIgnored(t *testing.T) {
 	body := []byte(`{"type":"media.added","rating":{"rating":8,"item_id":"item-1"}}`)
 	req := &pb.HandleHTTPRequest{
 		Method: "POST",
-		Path:   signPath("default", "secret", time.Now().Unix(), body),
+		Path:   webhookPath + "/" + deriveAuthToken("secret"),
 		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
@@ -229,7 +227,7 @@ func TestWebhookNoItemIDIgnored(t *testing.T) {
 	body := []byte(`{"type":"rating.set","rating":{"rating":8,"item_id":""}}`)
 	req := &pb.HandleHTTPRequest{
 		Method: "POST",
-		Path:   signPath("default", "secret", time.Now().Unix(), body),
+		Path:   webhookPath + "/" + deriveAuthToken("secret"),
 		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
@@ -253,7 +251,7 @@ func TestWebhookNoItemIDIgnored(t *testing.T) {
 func TestWebhookDedupeSkipsInflight(t *testing.T) {
 	routes := newTestRoutes("secret")
 	body := ratingBody("item-dup")
-	path := signPath("default", "secret", time.Now().Unix(), body)
+	path := webhookPath + "/" + deriveAuthToken("secret")
 	req := &pb.HandleHTTPRequest{Method: "POST", Path: path, Body: body}
 	// First delivery starts processing.
 	resp, err := routes.Handle(context.Background(), req)
@@ -289,7 +287,7 @@ func TestWebhookNotConfigured(t *testing.T) {
 	body := ratingBody("item-1")
 	req := &pb.HandleHTTPRequest{
 		Method: "POST",
-		Path:   signPath("default", "secret", time.Now().Unix(), body),
+		Path:   webhookPath + "/" + deriveAuthToken("secret"),
 		Body:   body,
 	}
 	resp, err := routes.Handle(context.Background(), req)
@@ -330,8 +328,53 @@ func TestStatusRequiresAdmin(t *testing.T) {
 	if err := json.Unmarshal(resp2.Body, &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if payload.Version != "0.1.1" || !payload.Configured {
-		t.Fatalf("payload = %#v, want version 0.1.1 configured=true", payload)
+	if payload.Version != "0.1.2" || !payload.Configured {
+		t.Fatalf("payload = %#v, want version 0.1.2 configured=true", payload)
+	}
+}
+
+func TestAdminTokenEndpoint(t *testing.T) {
+	server := &runtimeServer{config: &pluginConfig{
+		SubextractorURL:    "http://subextractor:8975",
+		SubextractorAPIKey: "test-key",
+		WebhookSecret:      "default-secret",
+		WebhookSecrets:     map[string]string{"subex": "custom-secret"},
+	}}
+	routes := newWebhookRoutes(server)
+	// Non-admin gets 403.
+	resp, err := routes.Handle(context.Background(), &pb.HandleHTTPRequest{Method: "GET", Path: adminTokenPath})
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	// Admin gets derived tokens keyed by id, never raw secrets.
+	resp2, err := routes.Handle(context.Background(), &pb.HandleHTTPRequest{
+		Method:  "GET",
+		Path:    adminTokenPath,
+		Headers: map[string]string{adminRoleHeader: "admin"},
+	})
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp2.StatusCode)
+	}
+	var payload struct {
+		Tokens map[string]string `json:"tokens"`
+	}
+	if err := json.Unmarshal(resp2.Body, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Tokens["default"] != deriveAuthToken("default-secret") {
+		t.Fatalf("default token = %q, want derived from default-secret", payload.Tokens["default"])
+	}
+	if payload.Tokens["subex"] != deriveAuthToken("custom-secret") {
+		t.Fatalf("subex token = %q, want derived from custom-secret", payload.Tokens["subex"])
+	}
+	if strings.Contains(string(resp2.Body), "default-secret") || strings.Contains(string(resp2.Body), "custom-secret") {
+		t.Fatalf("token endpoint leaked raw secrets: %s", string(resp2.Body))
 	}
 }
 
@@ -350,30 +393,42 @@ func TestUnknownPath404(t *testing.T) {
 	}
 }
 
-func TestVerifySignature(t *testing.T) {
+func TestVerifyHeaderSignature(t *testing.T) {
 	secret := "s3cret"
 	body := []byte(`{"hello":"world"}`)
 	now := time.Now().Unix()
-	valid := signPath("default", secret, now, body)
-	// Extract the digest from the path and verify.
-	digest := strings.TrimPrefix(strings.Split(valid, "/v1:")[1], "")
-	if !verifySignature(secret, body, now, digest) {
+	valid := signHeader(secret, now, body)
+	if !verifyHeaderSignature(secret, body, valid) {
 		t.Fatal("valid signature rejected")
 	}
-	if verifySignature("other", body, now, digest) {
+	if verifyHeaderSignature("other", body, valid) {
 		t.Fatal("signature with wrong secret accepted")
 	}
-	if verifySignature(secret, []byte(`{"hello":"tampered"}`), now, digest) {
+	if verifyHeaderSignature(secret, []byte(`{"hello":"tampered"}`), valid) {
 		t.Fatal("signature for tampered body accepted")
 	}
-	if verifySignature(secret, body, now-1000, digest) {
+	if verifyHeaderSignature(secret, body, "t=abc,v1=deadbeef") {
+		t.Fatal("malformed timestamp accepted")
+	}
+	if verifyHeaderSignature(secret, body, "v1=deadbeef") {
+		t.Fatal("missing timestamp accepted")
+	}
+	if verifyHeaderSignature(secret, body, "") {
+		t.Fatal("empty header accepted")
+	}
+	if verifyHeaderSignature(secret, body, signHeader(secret, now-1000, body)) {
 		t.Fatal("expired signature accepted")
 	}
-	if verifySignature(secret, body, now, "deadbeef") {
-		t.Fatal("malformed digest accepted")
+}
+
+func TestDeriveAuthTokenDeterministic(t *testing.T) {
+	a := deriveAuthToken("secret")
+	b := deriveAuthToken("secret")
+	if a != b || len(a) != 64 {
+		t.Fatalf("deriveAuthToken not deterministic 64-hex: %q vs %q", a, b)
 	}
-	if verifySignature("", body, now, digest) {
-		t.Fatal("empty secret accepted")
+	if a == deriveAuthToken("other") {
+		t.Fatal("deriveAuthToken collision for different secrets")
 	}
 }
 

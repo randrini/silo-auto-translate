@@ -38,26 +38,40 @@ Translated FR subtitles are stored by silo as subtitle-provider subtitles in its
 | `subextractor_url` | Base URL of SubExtractor, e.g. `http://subextractor:8975` (plain HTTP allowed only for private/local hosts) |
 | `subextractor_api_key` | The `WEB_UI_API_KEY` of the SubExtractor instance |
 | `webhook_secret` | Same value as SubExtractor's `SILO_WEBHOOK_SECRET` (acts as secret id `default`) |
-| `webhook_secrets` | Optional JSON object mapping secret id → secret for multiple silo webhook registrations, e.g. `{"subex": "whsec_..."}`. Entries take precedence over `webhook_secret` for matching ids |
+| `webhook_secrets` | Optional JSON object mapping secret id → secret for multiple silo webhook registrations, e.g. `{"subex": "whsec_..."}`. Each id gets its own derived auth token; entries take precedence over `webhook_secret` for matching ids |
 
 5. Copy the **webhook URL** shown on the plugin's admin page. It has the form:
 
    ```
-   https://<silo-host>/plugins/<installation_id>/webhook/sig:<secretId>/ts:<unix-epoch>/v1:<hex>
+   https://<silo-host>/plugins/<installation_id>/webhook/<authToken>
    ```
 
-   Silo's plugin proxy forwards only a fixed header whitelist and drops `X-Silo-Signature`, so the signature components ride in the path. The HMAC still validates `epoch.body` (silo signs only the body, never the URL), so path rewriting is safe. Regenerate the URL when re-registering the webhook.
+   The `<authToken>` is derived from the webhook secret (`hex(hmac_sha256(key=secret, msg="silo-auto-translate:v1"))`) — safe to expose in the URL. Silo's webhook sender POSTs to the static configured URL on every delivery and its plugin proxy forwards only a fixed header whitelist (`forwardedRequestHeaders`, `internal/plugins/http_proxy.go:306`), dropping `X-Silo-Signature` and the other `X-Silo-*` headers. The token therefore authenticates the route. Regenerate the URL if the webhook secret rotates.
 
-6. In silo, go to **Settings → Notifications → Webhooks**, add a webhook with that URL, and enable **Ratings**. Use a custom secret id from `webhook_secrets` (e.g. `sig:subex`) if you registered more than one webhook.
+6. In silo, go to **Settings → Notifications → Webhooks**, add a webhook with that URL, and enable **Ratings**. If you configured multiple secrets in `webhook_secrets`, use the URL for the matching secret id.
+
+### Full HMAC verification (optional fork patch)
+
+The plugin verifies the full per-delivery HMAC (`X-Silo-Signature`, Stripe `t=,v1=` convention, ±300s) automatically whenever the host forwards the header. The randrini/silo-server fork can enable this by whitelisting the header in `internal/plugins/http_proxy.go`:
+
+```go
+allowed := map[string]struct{}{
+    // ...existing entries...
+    "x-silo-signature": {},
+}
+```
+
+Until then, the derived auth token in the path is the authentication mechanism.
 
 ## Routes
 
 | Path | Method | Access | Purpose |
 |------|--------|--------|---------|
-| `/webhook/*` | POST | public | Receives signed `rating.set` deliveries; signature components ride in the path (`/webhook/sig:<secretId>/ts:<epoch>/v1:<hex>`); verifies HMAC, dedupes, ACKs fast, processes async |
-| `/webhook` | POST | public | Exact path without signature tokens → 400 with a hint (fails fast so misconfiguration is visible) |
+| `/webhook/*` | POST | public | Receives `rating.set` deliveries; path carries a constant auth token derived from the webhook secret (`/webhook/<authToken>`); verifies token (and full HMAC when `X-Silo-Signature` is forwarded), dedupes, ACKs fast, processes async |
+| `/webhook` | POST | public | Exact path without an auth token → 400 with a hint (fails fast so misconfiguration is visible) |
 | `/status` | GET | admin | JSON `{"version": ..., "configured": bool}` |
-| `/admin/auto-translate` | GET | admin | Self-contained admin page showing status + webhook URL |
+| `/admin/auto-translate` | GET | admin | Self-contained admin page showing status + webhook URLs per secret id |
+| `/admin/auto-translate/token` | GET | admin | JSON `{"tokens": {"<secretId>": "<authToken>", ...}}` — derived tokens only, never raw secrets |
 
 ## Development
 

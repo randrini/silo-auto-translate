@@ -1,6 +1,6 @@
 {
   "plugin_id": "com.randrini.silo-auto-translate",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "silo_api_version": "v1",
   "capabilities": [
     {
@@ -18,7 +18,7 @@
       "access": "public"
     },
     {
-      "id": "webhook-signed",
+      "id": "webhook-token",
       "method": "POST",
       "path": "/webhook/*",
       "access": "public"
@@ -37,6 +37,12 @@
       "navigable": true,
       "navigation_label": "Auto Translate",
       "navigation_kind": "admin"
+    },
+    {
+      "id": "admin-token",
+      "method": "GET",
+      "path": "/admin/auto-translate/token",
+      "access": "admin"
     }
   ],
   "presentation": {
@@ -95,7 +101,7 @@
           {
             "key": "webhook_secret",
             "label": "Webhook Secret",
-            "description": "Same value as SubExtractor's SILO_WEBHOOK_SECRET. Used to verify the webhook HMAC when no matching id is present in webhook_secrets (acts as secret id \"default\").",
+            "description": "Same value as SubExtractor's SILO_WEBHOOK_SECRET. Derives the auth token for the webhook URL (acts as secret id \"default\") and verifies the HMAC when the host forwards X-Silo-Signature.",
             "control": "ADMIN_FORM_CONTROL_PASSWORD",
             "required": true,
             "secret": true
@@ -103,7 +109,7 @@
           {
             "key": "webhook_secrets",
             "label": "Additional Webhook Secrets",
-            "description": "Optional JSON object mapping secret id → secret for multiple silo webhook registrations, e.g. {\"subex\": \"whsec_...\"}. Entries take precedence over the default webhook_secret for matching ids.",
+            "description": "Optional JSON object mapping secret id → secret for multiple silo webhook registrations, e.g. {\"subex\": \"whsec_...\"}. Each id gets its own derived auth token; entries take precedence over the default webhook_secret for matching ids.",
             "control": "ADMIN_FORM_CONTROL_TEXTAREA",
             "rows": 4,
             "required": false,

@@ -23,13 +23,20 @@ import (
 )
 
 const (
-	statusPath         = "/status"
-	webhookPath        = "/webhook"
-	adminPagePath      = "/admin/auto-translate"
-	adminRoleHeader    = "X-Silo-User-Role"
-	maxWebhookBody     = 1 << 20 // 1 MiB
-	signatureMaxAge    = 300 * time.Second
+	statusPath          = "/status"
+	webhookPath         = "/webhook"
+	adminPagePath       = "/admin/auto-translate"
+	adminTokenPath      = "/admin/auto-translate/token"
+	adminRoleHeader     = "X-Silo-User-Role"
+	webhookHeader       = "X-Silo-Signature"
+	maxWebhookBody      = 1 << 20 // 1 MiB
+	signatureMaxAge     = 300 * time.Second
 	subextractorTimeout = 1800 * time.Second
+	// authTokenMessage is the HMAC message used to derive the constant auth
+	// token for a webhook secret. The token is safe to expose in the webhook
+	// URL: it authenticates the route, while the full per-delivery HMAC
+	// (X-Silo-Signature) is verified whenever the host forwards it.
+	authTokenMessage = "silo-auto-translate:v1"
 )
 
 // pluginConfig is the in-memory SubExtractor connection settings.
@@ -60,6 +67,45 @@ func (c *pluginConfig) secretFor(id string) (string, bool) {
 	return "", false
 }
 
+// allSecrets returns every configured secret keyed by id, with the default
+// secret first.
+func (c *pluginConfig) allSecrets() map[string]string {
+	out := make(map[string]string, len(c.WebhookSecrets)+1)
+	if strings.TrimSpace(c.WebhookSecret) != "" {
+		out["default"] = c.WebhookSecret
+	}
+	for id, secret := range c.WebhookSecrets {
+		if strings.TrimSpace(id) != "" && strings.TrimSpace(secret) != "" {
+			out[id] = secret
+		}
+	}
+	return out
+}
+
+// deriveAuthToken computes the constant auth token for a webhook secret:
+// hex(hmac_sha256(key=secret, msg="silo-auto-translate:v1")).
+func deriveAuthToken(secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(authTokenMessage))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// matchToken finds the secret id and secret whose derived auth token equals
+// the path token, using constant-time comparison. Returns ok=false when no
+// configured secret matches.
+func (c *pluginConfig) matchToken(token string) (secretID, secret string, ok bool) {
+	if token == "" {
+		return "", "", false
+	}
+	for id, s := range c.allSecrets() {
+		derived := deriveAuthToken(s)
+		if hmac.Equal([]byte(derived), []byte(strings.ToLower(token))) {
+			return id, s, true
+		}
+	}
+	return "", "", false
+}
+
 // webhookPayload is the rating.set delivery body sent by silo's notification
 // system. Only type == "rating.set" with a non-empty rating.item_id triggers
 // processing; anything else is ignored.
@@ -85,7 +131,7 @@ type subextractorRequest struct {
 
 // webhookRoutes implements the http_routes.v1 capability. The host proxies
 // requests to Handle with the declared route path (e.g. "/webhook") and
-// forwards the original headers.
+// forwards only a fixed header whitelist.
 type webhookRoutes struct {
 	pb.UnimplementedHttpRoutesServer
 	server *runtimeServer
@@ -115,12 +161,14 @@ func (w *webhookRoutes) Handle(ctx context.Context, req *pb.HandleHTTPRequest) (
 		return w.handleStatus(req)
 	case path == adminPagePath && method == http.MethodGet:
 		return w.handleAdminPage(req)
+	case path == adminTokenPath && method == http.MethodGet:
+		return w.handleAdminToken(req)
 	case path == webhookPath && method == http.MethodPost:
-		// Exact /webhook without signature tokens: fail fast and visibly so
+		// Exact /webhook without an auth token: fail fast and visibly so
 		// misconfiguration is noticed instead of silently succeeding.
 		return jsonResponse(http.StatusBadRequest, map[string]string{
-			"error": "missing signature token",
-			"hint":  "use /webhook/sig:<secretId>/ts:<epoch>",
+			"error": "missing auth token",
+			"hint":  "append /<auth-token> from the plugin admin page",
 		})
 	case strings.HasPrefix(path, webhookPath+"/") && method == http.MethodPost:
 		return w.handleWebhook(ctx, req)
@@ -136,14 +184,30 @@ func (w *webhookRoutes) handleStatus(req *pb.HandleHTTPRequest) (*pb.HandleHTTPR
 	}
 	cfg := w.currentConfig()
 	return jsonResponse(http.StatusOK, map[string]any{
-		"version":    "0.1.1",
+		"version":    "0.1.2",
 		"configured": cfg != nil,
 	})
 }
 
+// handleAdminToken serves GET /admin/auto-translate/token (admin only):
+// the derived auth tokens keyed by secret id. Raw secrets are never returned.
+func (w *webhookRoutes) handleAdminToken(req *pb.HandleHTTPRequest) (*pb.HandleHTTPResponse, error) {
+	if !isAdmin(req) {
+		return jsonResponse(http.StatusForbidden, map[string]string{"error": "admin access required"})
+	}
+	cfg := w.currentConfig()
+	tokens := map[string]string{}
+	if cfg != nil {
+		for id, secret := range cfg.allSecrets() {
+			tokens[id] = deriveAuthToken(secret)
+		}
+	}
+	return jsonResponse(http.StatusOK, map[string]any{"tokens": tokens})
+}
+
 // handleAdminPage serves GET /admin/auto-translate (admin only): a small
-// self-contained page showing the configured state and the exact webhook URL
-// computed from the current location.
+// self-contained page showing the configured state and the webhook URLs
+// (one per secret id), fetched from the token endpoint.
 func (w *webhookRoutes) handleAdminPage(req *pb.HandleHTTPRequest) (*pb.HandleHTTPResponse, error) {
 	if !isAdmin(req) {
 		return jsonResponse(http.StatusForbidden, map[string]string{"error": "admin access required"})
@@ -155,20 +219,20 @@ func (w *webhookRoutes) handleAdminPage(req *pb.HandleHTTPRequest) (*pb.HandleHT
 		StatusCode: http.StatusOK,
 		Body:       body,
 		Headers: map[string]string{
-			"Content-Type": "text/html; charset=utf-8",
+			"Content-Type":  "text/html; charset=utf-8",
 			"Cache-Control": "no-store",
 		},
 	}, nil
 }
 
-// handleWebhook serves POST /webhook/* (public). The signature components
-// ride in the path — silo's plugin proxy forwards only a fixed header
-// whitelist and drops X-Silo-Signature, so the HMAC inputs are carried as
-// /webhook/sig:<secretId>/ts:<epoch>/v1:<hex>. The HMAC still covers
-// "<epoch>.<body>" (silo signs only the body, never the URL), so path
-// rewriting is safe. It verifies synchronously, parses the payload, dedupes
-// by item_id, then kicks off the SubExtractor call in a goroutine and ACKs
-// fast.
+// handleWebhook serves POST /webhook/* (public). The path carries a constant
+// auth token derived from the webhook secret: /webhook/<authToken>. Silo's
+// webhook sender POSTs to the static configured URL and its plugin proxy
+// strips X-Silo-* headers, so the token authenticates the route. When the
+// host forwards X-Silo-Signature (future fork whitelist), the full per-
+// delivery HMAC is verified instead. It verifies synchronously, parses the
+// payload, dedupes by item_id, then kicks off the SubExtractor call in a
+// goroutine and ACKs fast.
 func (w *webhookRoutes) handleWebhook(ctx context.Context, req *pb.HandleHTTPRequest) (*pb.HandleHTTPResponse, error) {
 	cfg := w.currentConfig()
 	if cfg == nil {
@@ -177,16 +241,22 @@ func (w *webhookRoutes) handleWebhook(ctx context.Context, req *pb.HandleHTTPReq
 	if len(req.GetBody()) > maxWebhookBody {
 		return jsonResponse(http.StatusBadRequest, map[string]string{"error": "body too large"})
 	}
-	secretID, epoch, claimed, err := parseSignaturePath(req.GetPath())
+	token, err := authTokenFromPath(req.GetPath())
 	if err != nil {
 		return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
-	secret, ok := cfg.secretFor(secretID)
+	secretID, secret, ok := cfg.matchToken(token)
 	if !ok {
-		return jsonResponse(http.StatusUnauthorized, map[string]string{"error": "unknown signature id"})
+		return jsonResponse(http.StatusUnauthorized, map[string]string{"error": "invalid auth token"})
 	}
-	if !verifySignature(secret, req.GetBody(), epoch, claimed) {
-		return jsonResponse(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
+	// If the host forwards X-Silo-Signature (future fork whitelist), verify
+	// the full per-delivery HMAC against the secret identified by the path
+	// token. An invalid header signature is rejected even though the token
+	// matched.
+	if header := req.GetHeaders()[webhookHeader]; header != "" {
+		if !verifyHeaderSignature(secret, req.GetBody(), header) {
+			return jsonResponse(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
+		}
 	}
 	payload, err := parsePayload(req.GetBody())
 	if err != nil {
@@ -203,48 +273,23 @@ func (w *webhookRoutes) handleWebhook(ctx context.Context, req *pb.HandleHTTPReq
 	if payload.Series != nil && strings.TrimSpace(payload.Series.Title) != "" {
 		title = strings.TrimSpace(payload.Series.Title)
 	}
+	w.logger.Debug("webhook authenticated", "secret_id", secretID, "item_id", itemID)
 	go w.processAsync(cfg, itemID, title)
 	return jsonResponse(http.StatusOK, map[string]string{"status": "accepted", "item_id": itemID})
 }
 
-// parseSignaturePath extracts the secret id, signed epoch, and claimed HMAC
-// digest from a webhook path of the form
-// /webhook/sig:<secretId>/ts:<epoch>/v1:<hex>. Extra segments are tolerated;
-// any missing or malformed token yields a clear 4xx error.
-func parseSignaturePath(path string) (secretID string, epoch int64, claimed string, err error) {
+// authTokenFromPath extracts the auth token from a webhook path of the form
+// /webhook/<authToken>. Extra segments are tolerated; a missing token yields
+// a clear 400 error.
+func authTokenFromPath(path string) (string, error) {
 	rest := strings.TrimPrefix(strings.TrimRight(path, "/"), webhookPath+"/")
 	segments := strings.Split(rest, "/")
-	var secretIDRaw, epochRaw, claimedRaw string
 	for _, seg := range segments {
-		switch {
-		case strings.HasPrefix(seg, "sig:"):
-			secretIDRaw = strings.TrimPrefix(seg, "sig:")
-		case strings.HasPrefix(seg, "ts:"):
-			epochRaw = strings.TrimPrefix(seg, "ts:")
-		case strings.HasPrefix(seg, "v1:"):
-			claimedRaw = strings.TrimPrefix(seg, "v1:")
+		if seg != "" {
+			return seg, nil
 		}
 	}
-	if secretIDRaw == "" {
-		return "", 0, "", errors.New("missing signature token")
-	}
-	if epochRaw == "" {
-		return "", 0, "", errors.New("missing timestamp token")
-	}
-	if claimedRaw == "" {
-		return "", 0, "", errors.New("missing signature digest")
-	}
-	epoch, err = strconv.ParseInt(epochRaw, 10, 64)
-	if err != nil || epoch <= 0 {
-		return "", 0, "", errors.New("invalid timestamp token")
-	}
-	if len(claimedRaw) != 64 {
-		return "", 0, "", errors.New("invalid signature digest")
-	}
-	if _, err := hex.DecodeString(claimedRaw); err != nil {
-		return "", 0, "", errors.New("invalid signature digest")
-	}
-	return secretIDRaw, epoch, strings.ToLower(claimedRaw), nil
+	return "", errors.New("missing auth token")
 }
 
 // processAsync POSTs the item to SubExtractor's /api/silo/process and logs
@@ -332,24 +377,45 @@ func isPrivateHost(host string) bool {
 	return false
 }
 
-// verifySignature checks an HMAC over "<epoch>.<body>" using the Stripe
-// convention v1 = hex(hmac_sha256(secret, "<epoch>.<body>")). The epoch is
-// the signed timestamp carried in the path; it must be within
-// signatureMaxAge of now. claimed is the hex digest from the path.
-func verifySignature(secret string, body []byte, epoch int64, claimed string) bool {
-	if secret == "" || epoch <= 0 || len(claimed) != 64 {
+// verifyHeaderSignature checks the Stripe-convention X-Silo-Signature header:
+// "t=<epoch>,v1=<hex(hmac_sha256(secret, "<epoch>.<body>"))>". The timestamp
+// must be within signatureMaxAge of now.
+func verifyHeaderSignature(secret string, body []byte, header string) bool {
+	if secret == "" || header == "" {
+		return false
+	}
+	parts := strings.Split(header, ",")
+	var timestamp int64
+	var signature string
+	for _, part := range parts {
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			return false
+		}
+		switch kv[0] {
+		case "t":
+			ts, err := strconv.ParseInt(kv[1], 10, 64)
+			if err != nil {
+				return false
+			}
+			timestamp = ts
+		case "v1":
+			signature = kv[1]
+		}
+	}
+	if timestamp == 0 || signature == "" {
 		return false
 	}
 	now := time.Now().Unix()
-	if now-epoch > int64(signatureMaxAge.Seconds()) || epoch-now > int64(signatureMaxAge.Seconds()) {
+	if now-timestamp > int64(signatureMaxAge.Seconds()) || timestamp-now > int64(signatureMaxAge.Seconds()) {
 		return false
 	}
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(strconv.FormatInt(epoch, 10)))
+	mac.Write([]byte(strconv.FormatInt(timestamp, 10)))
 	mac.Write([]byte{'.'})
 	mac.Write(body)
 	expected := hex.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(expected), []byte(strings.ToLower(claimed)))
+	return hmac.Equal([]byte(expected), []byte(strings.ToLower(signature)))
 }
 
 // parsePayload decodes the webhook body into a typed struct.
@@ -404,9 +470,9 @@ func jsonResponse(status int, payload any) (*pb.HandleHTTPResponse, error) {
 	}, nil
 }
 
-// adminPageHTML is a minimal self-contained admin page. The webhook URL is
-// computed in JS from the current location so it works regardless of the
-// installation id in the mount path.
+// adminPageHTML is a minimal self-contained admin page. The webhook URLs are
+// fetched from the token endpoint and rendered per secret id, so they work
+// regardless of the installation id in the mount path.
 const adminPageHTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -429,6 +495,7 @@ const adminPageHTML = `<!doctype html>
   code { background: #0d0f13; border: 1px solid #262b36; border-radius: 6px; padding: 8px 10px; display: block; font-size: 13px; word-break: break-all; margin-top: 8px; }
   .hint { color: #8b93a1; font-size: 13px; margin-top: 8px; line-height: 1.5; }
   a { color: #60a5fa; }
+  .url-label { font-size: 12px; color: #8b93a1; margin-top: 12px; text-transform: uppercase; letter-spacing: .06em; }
 </style>
 </head>
 <body>
@@ -438,23 +505,36 @@ const adminPageHTML = `<!doctype html>
   <p class="hint">Rating an item in a profile triggers a signed webhook that asks SubExtractor to extract and translate subtitles to French, then upload them back to silo.</p>
   <div class="card">
     <div class="row"><span class="label">Status</span><span id="status" class="no">%s</span></div>
-    <div class="row"><span class="label">Webhook URL</span></div>
-    <code id="webhook-url">…</code>
-    <p class="hint">Use this URL in <b>Settings → Notifications → Webhooks</b> (enable Ratings). Silo's plugin proxy forwards only a fixed header whitelist and drops <code>X-Silo-Signature</code>, so the signature components ride in the path: <code>/webhook/sig:&lt;secretId&gt;/ts:&lt;epoch&gt;/v1:&lt;hex&gt;</code>. The <code>ts</code> segment is the signed epoch; the HMAC still validates <code>epoch.body</code>, so path rewriting is safe. Regenerate the URL when re-registering the webhook.</p>
-    <p class="hint">Custom secret ids from <code>webhook_secrets</code> (e.g. <code>subex</code>) can be used in place of <code>default</code>.</p>
+    <div class="row"><span class="label">Webhook URLs</span></div>
+    <div id="urls"><p class="hint">Loading…</p></div>
+    <p class="hint">Use one of these URLs in <b>Settings → Notifications → Webhooks</b> (enable Ratings). The token is derived (HMAC) from the webhook secret — safe to expose. Silo's plugin proxy strips signature headers, so the token authenticates the route; full per-delivery HMAC verification activates automatically when the host forwards <code>X-Silo-Signature</code>. Regenerate the URL if the webhook secret rotates.</p>
   </div>
 </div>
 <script>
   (function () {
     var m = location.pathname.match(/\/plugins\/(\d+)\//);
     var id = m ? m[1] : null;
-    var el = document.getElementById('webhook-url');
-    if (id) {
-      var ts = Math.floor(Date.now() / 1000);
-      el.textContent = location.origin + '/plugins/' + id + '/webhook/sig:default/ts:' + ts + '/v1:<hex>';
-    } else {
-      el.textContent = 'Unable to determine plugin installation id from ' + location.pathname;
+    var el = document.getElementById('urls');
+    if (!id) {
+      el.innerHTML = '<p class="hint">Unable to determine plugin installation id from ' + location.pathname + '</p>';
+      return;
     }
+    var base = location.origin + '/plugins/' + id + '/webhook/';
+    fetch(location.pathname + '/token').then(function (r) { return r.json(); }).then(function (data) {
+      var tokens = data.tokens || {};
+      var keys = Object.keys(tokens);
+      if (keys.length === 0) {
+        el.innerHTML = '<p class="hint">No webhook secrets configured.</p>';
+        return;
+      }
+      var html = '';
+      keys.forEach(function (k) {
+        html += '<div class="url-label">Secret id: ' + k + '</div><code>' + base + tokens[k] + '</code>';
+      });
+      el.innerHTML = html;
+    }).catch(function (e) {
+      el.innerHTML = '<p class="hint">Failed to load tokens: ' + e + '</p>';
+    });
   })();
 </script>
 </body>
