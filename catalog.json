@@ -3,7 +3,7 @@
     {
       "manifest": {
         "plugin_id": "com.randrini.silo-auto-translate",
-        "version": "0.1.2",
+        "version": "0.2.0",
         "silo_api_version": "v1",
         "capabilities": [
           {
@@ -11,6 +11,23 @@
             "id": "webhook-routes",
             "display_name": "Auto Translate",
             "description": "Receives signed rating.set webhooks and triggers SubExtractor to extract and translate subtitles to French."
+          },
+          {
+            "type": "watch_sync_provider.v1",
+            "id": "favorite-watcher",
+            "display_name": "Auto Translate Favorites",
+            "description": "Triggers SubExtractor when a profile favorites a movie or episode.",
+            "watch_sync_provider": {
+              "auth_methods": [
+                "WATCH_SYNC_AUTH_METHOD_API_KEY"
+              ],
+              "export_favorites": true,
+              "supported_media_types": [
+                "WATCH_SYNC_MEDIA_TYPE_MOVIE",
+                "WATCH_SYNC_MEDIA_TYPE_EPISODE"
+              ],
+              "max_batch_size": 25
+            }
           }
         ],
         "http_routes": [
@@ -80,10 +97,19 @@
             "key": "subextractor",
             "title": "SubExtractor connection",
             "description": "Connection settings for the SubExtractor instance that performs extraction and translation.",
-            "json_schema": "{\"type\":\"object\",\"properties\":{\"subextractor_url\":{\"type\":\"string\",\"format\":\"uri\",\"maxLength\":4096},\"subextractor_api_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secret\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secrets\":{\"type\":\"string\",\"maxLength\":16384}},\"required\":[\"subextractor_url\",\"subextractor_api_key\",\"webhook_secret\"],\"additionalProperties\":false}",
+            "json_schema": "{\"type\":\"object\",\"properties\":{\"enabled\":{\"type\":\"boolean\",\"default\":true},\"subextractor_url\":{\"type\":\"string\",\"format\":\"uri\",\"maxLength\":4096},\"subextractor_api_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secret\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secrets\":{\"type\":\"string\",\"maxLength\":16384}},\"required\":[\"subextractor_url\",\"subextractor_api_key\",\"webhook_secret\"],\"additionalProperties\":false}",
             "required": true,
             "admin_form": {
               "fields": [
+                {
+                  "key": "enabled",
+                  "label": "Enabled",
+                  "description": "When off, the plugin ignores rating webhooks and favorite events until re-enabled.",
+                  "control": 5,
+                  "required": false,
+                  "secret": false,
+                  "default_value": true
+                },
                 {
                   "key": "subextractor_url",
                   "label": "SubExtractor URL",
@@ -126,19 +152,19 @@
         ]
       },
       "repo_url": "https://github.com/randrini/silo-auto-translate",
-      "checksums_url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.2/checksums.txt",
+      "checksums_url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.0/checksums.txt",
       "binaries": {
         "linux/amd64": {
-          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.2/plugin-linux-amd64",
-          "checksum": "2ef01468635fe9e3f7d5493d45f86f1cc86ac68eb2d8277a64d717a4d58ba23a"
+          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.0/plugin-linux-amd64",
+          "checksum": "9974a802942ee7db9acf11370e418b77b0f1ea984398932fbe5fcca91ee942f9"
         },
         "linux/arm64": {
-          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.2/plugin-linux-arm64",
-          "checksum": "8c64ad3aa8fd4f73879ba99985f590894e7bffa3abf19fe4f30ae2fd1d3911e0"
+          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.0/plugin-linux-arm64",
+          "checksum": "1e2d00ff32971707dce2e2a7d81cca04a85dba2b14fb3822f5d645052ec040b7"
         },
         "darwin/arm64": {
-          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.1.2/plugin-darwin-arm64",
-          "checksum": "5f5cf280147e6556a19fa8b4dbdba7e9ee55d4f35114c576aa50454f0a1f352d"
+          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.0/plugin-darwin-arm64",
+          "checksum": "a67382176d6279bc0ec8a2bf2b0a3bc0cf7cf6b748995dbe1624c0b7fdd51739"
         }
       }
     }
