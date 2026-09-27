@@ -3,7 +3,7 @@
     {
       "manifest": {
         "plugin_id": "com.randrini.silo-auto-translate",
-        "version": "0.2.0",
+        "version": "0.2.1",
         "silo_api_version": "v1",
         "capabilities": [
           {
@@ -28,6 +28,12 @@
               ],
               "max_batch_size": 25
             }
+          },
+          {
+            "type": "request_router.v1",
+            "id": "connection-check",
+            "display_name": "Auto Translate Connection Check",
+            "description": "Backs the Check Connection button: probes SubExtractor /api/health and /api/silo/status with the candidate config."
           }
         ],
         "http_routes": [
@@ -152,19 +158,19 @@
         ]
       },
       "repo_url": "https://github.com/randrini/silo-auto-translate",
-      "checksums_url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.0/checksums.txt",
+      "checksums_url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.1/checksums.txt",
       "binaries": {
         "linux/amd64": {
-          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.0/plugin-linux-amd64",
-          "checksum": "9974a802942ee7db9acf11370e418b77b0f1ea984398932fbe5fcca91ee942f9"
+          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.1/plugin-linux-amd64",
+          "checksum": "b801ba7a4b517eb7b760cc7c4d8e0962b1d13e020606fb1d0acf222df145d1b8"
         },
         "linux/arm64": {
-          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.0/plugin-linux-arm64",
-          "checksum": "1e2d00ff32971707dce2e2a7d81cca04a85dba2b14fb3822f5d645052ec040b7"
+          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.1/plugin-linux-arm64",
+          "checksum": "2397e673db68a0abe038004019dab8ed778becb326db70390ffa96331f465c23"
         },
         "darwin/arm64": {
-          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.0/plugin-darwin-arm64",
-          "checksum": "a67382176d6279bc0ec8a2bf2b0a3bc0cf7cf6b748995dbe1624c0b7fdd51739"
+          "url": "https://github.com/randrini/silo-auto-translate/releases/download/v0.2.1/plugin-darwin-arm64",
+          "checksum": "09094a29c4803621099f156064ffa494fe9791e53885833bd0fa06328ba5223a"
         }
       }
     }
