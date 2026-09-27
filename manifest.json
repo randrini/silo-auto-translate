@@ -1,6 +1,6 @@
 {
   "plugin_id": "com.randrini.silo-auto-translate",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "silo_api_version": "v1",
   "capabilities": [
     {
@@ -8,6 +8,23 @@
       "id": "webhook-routes",
       "display_name": "Auto Translate",
       "description": "Receives signed rating.set webhooks and triggers SubExtractor to extract and translate subtitles to French."
+    },
+    {
+      "type": "watch_sync_provider.v1",
+      "id": "favorite-watcher",
+      "display_name": "Auto Translate Favorites",
+      "description": "Triggers SubExtractor when a profile favorites a movie or episode.",
+      "watch_sync_provider": {
+        "auth_methods": [
+          "WATCH_SYNC_AUTH_METHOD_API_KEY"
+        ],
+        "export_favorites": true,
+        "supported_media_types": [
+          "WATCH_SYNC_MEDIA_TYPE_MOVIE",
+          "WATCH_SYNC_MEDIA_TYPE_EPISODE"
+        ],
+        "max_batch_size": 25
+      }
     }
   ],
   "http_routes": [
@@ -77,10 +94,19 @@
       "key": "subextractor",
       "title": "SubExtractor connection",
       "description": "Connection settings for the SubExtractor instance that performs extraction and translation.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"subextractor_url\":{\"type\":\"string\",\"format\":\"uri\",\"maxLength\":4096},\"subextractor_api_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secret\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secrets\":{\"type\":\"string\",\"maxLength\":16384}},\"required\":[\"subextractor_url\",\"subextractor_api_key\",\"webhook_secret\"],\"additionalProperties\":false}",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"enabled\":{\"type\":\"boolean\",\"default\":true},\"subextractor_url\":{\"type\":\"string\",\"format\":\"uri\",\"maxLength\":4096},\"subextractor_api_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secret\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"webhook_secrets\":{\"type\":\"string\",\"maxLength\":16384}},\"required\":[\"subextractor_url\",\"subextractor_api_key\",\"webhook_secret\"],\"additionalProperties\":false}",
       "required": true,
       "admin_form": {
         "fields": [
+          {
+            "key": "enabled",
+            "label": "Enabled",
+            "description": "When off, the plugin ignores rating webhooks and favorite events until re-enabled.",
+            "control": "ADMIN_FORM_CONTROL_SWITCH",
+            "required": false,
+            "secret": false,
+            "default_value": true
+          },
           {
             "key": "subextractor_url",
             "label": "SubExtractor URL",

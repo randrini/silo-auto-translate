@@ -110,8 +110,8 @@ func (c *pluginConfig) matchToken(token string) (secretID, secret string, ok boo
 // system. Only type == "rating.set" with a non-empty rating.item_id triggers
 // processing; anything else is ignored.
 type webhookPayload struct {
-	Type      string `json:"type"`
-	Rating    struct {
+	Type   string `json:"type"`
+	Rating struct {
 		Rating float64 `json:"rating"`
 		ItemID string  `json:"item_id"`
 	} `json:"rating"`
@@ -184,8 +184,9 @@ func (w *webhookRoutes) handleStatus(req *pb.HandleHTTPRequest) (*pb.HandleHTTPR
 	}
 	cfg := w.currentConfig()
 	return jsonResponse(http.StatusOK, map[string]any{
-		"version":    "0.1.2",
+		"version":    pluginVersion,
 		"configured": cfg != nil,
+		"enabled":    w.server.isEnabled(),
 	})
 }
 
@@ -234,6 +235,11 @@ func (w *webhookRoutes) handleAdminPage(req *pb.HandleHTTPRequest) (*pb.HandleHT
 // payload, dedupes by item_id, then kicks off the SubExtractor call in a
 // goroutine and ACKs fast.
 func (w *webhookRoutes) handleWebhook(ctx context.Context, req *pb.HandleHTTPRequest) (*pb.HandleHTTPResponse, error) {
+	if !w.server.isEnabled() {
+		// Distinct from a missing token: the admin toggle is off. The host
+		// (or a human) should turn the plugin back on via the admin form.
+		return jsonResponse(http.StatusServiceUnavailable, map[string]string{"error": "disabled"})
+	}
 	cfg := w.currentConfig()
 	if cfg == nil {
 		return jsonResponse(http.StatusServiceUnavailable, map[string]string{"error": "plugin is not configured"})

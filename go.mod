@@ -3,7 +3,7 @@ module github.com/randrini/silo-auto-translate
 go 1.26.0
 
 require (
-	github.com/Silo-Server/silo-plugin-sdk v0.12.0
+	github.com/Silo-Server/silo-plugin-sdk v0.13.2
 	github.com/hashicorp/go-hclog v1.6.3
 )
 

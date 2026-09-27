@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	pb "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func ratingBody(itemID string) []byte {
@@ -324,12 +326,13 @@ func TestStatusRequiresAdmin(t *testing.T) {
 	var payload struct {
 		Version    string `json:"version"`
 		Configured bool   `json:"configured"`
+		Enabled    bool   `json:"enabled"`
 	}
 	if err := json.Unmarshal(resp2.Body, &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if payload.Version != "0.1.2" || !payload.Configured {
-		t.Fatalf("payload = %#v, want version 0.1.2 configured=true", payload)
+	if payload.Version != "0.2.0" || !payload.Configured || !payload.Enabled {
+		t.Fatalf("payload = %#v, want version 0.2.0 configured=true enabled=true", payload)
 	}
 }
 
@@ -458,4 +461,315 @@ func TestSubextractorEndpointPolicy(t *testing.T) {
 			t.Fatalf("subextractorEndpoint(%q) = %q, want suffix /api/silo/process", tc.raw, got)
 		}
 	}
+}
+
+// --- enabled toggle -----------------------------------------------------
+
+func TestConfigureEnabledDefaultTrue(t *testing.T) {
+	server := &runtimeServer{}
+	if !server.isEnabled() {
+		t.Fatal("zero-value runtimeServer should be enabled")
+	}
+	value, _ := structpb.NewStruct(map[string]any{
+		"subextractor_url":     "http://subextractor:8975",
+		"subextractor_api_key": "k",
+		"webhook_secret":       "s",
+	})
+	if _, err := server.Configure(context.Background(), &pb.ConfigureRequest{
+		Config: []*pb.ConfigEntry{{Key: configKey, Value: value}},
+	}); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if !server.isEnabled() {
+		t.Fatal("enabled should default to true when the field is absent")
+	}
+}
+
+func TestConfigureDisabled(t *testing.T) {
+	server := &runtimeServer{}
+	value, _ := structpb.NewStruct(map[string]any{
+		"enabled":              false,
+		"subextractor_url":     "http://subextractor:8975",
+		"subextractor_api_key": "k",
+		"webhook_secret":       "s",
+	})
+	if _, err := server.Configure(context.Background(), &pb.ConfigureRequest{
+		Config: []*pb.ConfigEntry{{Key: configKey, Value: value}},
+	}); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if server.isEnabled() {
+		t.Fatal("enabled=false should disable the plugin")
+	}
+	if server.config == nil {
+		t.Fatal("connection should still be stored while disabled")
+	}
+}
+
+func TestWebhookDisabledReturns503(t *testing.T) {
+	server := &runtimeServer{
+		config: &pluginConfig{
+			SubextractorURL:    "http://subextractor:8975",
+			SubextractorAPIKey: "test-key",
+			WebhookSecret:      "secret",
+		},
+		disabled: true,
+	}
+	routes := newWebhookRoutes(server)
+	body := ratingBody("item-1")
+	req := &pb.HandleHTTPRequest{
+		Method: "POST",
+		Path:   webhookPath + "/" + deriveAuthToken("secret"),
+		Body:   body,
+	}
+	resp, err := routes.Handle(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Error != "disabled" {
+		t.Fatalf("error = %q, want disabled", payload.Error)
+	}
+	// Exact /webhook without a token keeps its 400 hint even when disabled.
+	noToken, err := routes.Handle(context.Background(), &pb.HandleHTTPRequest{Method: "POST", Path: webhookPath, Body: body})
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if noToken.StatusCode != http.StatusBadRequest {
+		t.Fatalf("no-token status = %d, want 400", noToken.StatusCode)
+	}
+}
+
+func TestStatusReportsDisabled(t *testing.T) {
+	server := &runtimeServer{
+		config: &pluginConfig{
+			SubextractorURL:    "http://subextractor:8975",
+			SubextractorAPIKey: "test-key",
+			WebhookSecret:      "secret",
+		},
+		disabled: true,
+	}
+	routes := newWebhookRoutes(server)
+	resp, err := routes.Handle(context.Background(), &pb.HandleHTTPRequest{
+		Method:  "GET",
+		Path:    statusPath,
+		Headers: map[string]string{adminRoleHeader: "admin"},
+	})
+	if err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	var payload struct {
+		Version    string `json:"version"`
+		Configured bool   `json:"configured"`
+		Enabled    bool   `json:"enabled"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Version != "0.2.0" || !payload.Configured || payload.Enabled {
+		t.Fatalf("payload = %#v, want version 0.2.0 configured=true enabled=false", payload)
+	}
+}
+
+// --- watch-sync favorite trigger ----------------------------------------
+
+func newTestSubextractor(t *testing.T) (*httptest.Server, <-chan subextractorRequest) {
+	t.Helper()
+	received := make(chan subextractorRequest, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/silo/process" {
+			http.NotFound(w, r)
+			return
+		}
+		var body subextractorRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		received <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, received
+}
+
+func newWatchRoutes(url string) (*webhookRoutes, *watchSyncProvider) {
+	server := &runtimeServer{config: &pluginConfig{
+		SubextractorURL:    url,
+		SubextractorAPIKey: "test-key",
+		WebhookSecret:      "secret",
+	}}
+	routes := newWebhookRoutes(server)
+	return routes, newWatchSyncProvider(routes)
+}
+
+func favoriteEvent(eventID, mediaID string, mediaType pb.WatchSyncMediaType, title string) *pb.WatchSyncEvent {
+	return &pb.WatchSyncEvent{
+		EventId:   eventID,
+		Operation: pb.WatchSyncOperation_WATCH_SYNC_OPERATION_ADD_FAVORITE,
+		Media: &pb.WatchSyncMedia{
+			MediaItemId: mediaID,
+			MediaType:   mediaType,
+			Title:       title,
+		},
+	}
+}
+
+func waitForCall(t *testing.T, ch <-chan subextractorRequest) subextractorRequest {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SubExtractor call")
+		return subextractorRequest{}
+	}
+}
+
+func assertNoCall(t *testing.T, ch <-chan subextractorRequest) {
+	t.Helper()
+	select {
+	case got := <-ch:
+		t.Fatalf("unexpected SubExtractor call: %#v", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestWatchSyncFavoriteAddMovieTriggers(t *testing.T) {
+	srv, received := newTestSubextractor(t)
+	_, watch := newWatchRoutes(srv.URL)
+	resp, err := watch.ApplyEvents(context.Background(), &pb.WatchSyncApplyEventsRequest{
+		Events: []*pb.WatchSyncEvent{
+			favoriteEvent("e1", "movie-1", pb.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE, "The Movie"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyEvents: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].GetStatus() != pb.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED {
+		t.Fatalf("results = %#v, want one APPLIED", resp.Results)
+	}
+	got := waitForCall(t, received)
+	if got.ItemID != "movie-1" || got.Title != "The Movie" {
+		t.Fatalf("call = %#v, want movie-1/The Movie", got)
+	}
+}
+
+func TestWatchSyncFavoriteAddEpisodeTriggers(t *testing.T) {
+	srv, received := newTestSubextractor(t)
+	_, watch := newWatchRoutes(srv.URL)
+	_, err := watch.ApplyEvents(context.Background(), &pb.WatchSyncApplyEventsRequest{
+		Events: []*pb.WatchSyncEvent{
+			favoriteEvent("e1", "episode-1", pb.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_EPISODE, "S01E02"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyEvents: %v", err)
+	}
+	got := waitForCall(t, received)
+	if got.ItemID != "episode-1" || got.Title != "S01E02" {
+		t.Fatalf("call = %#v, want episode-1/S01E02", got)
+	}
+}
+
+func TestWatchSyncSeriesFavoriteIgnored(t *testing.T) {
+	srv, received := newTestSubextractor(t)
+	_, watch := newWatchRoutes(srv.URL)
+	resp, err := watch.ApplyEvents(context.Background(), &pb.WatchSyncApplyEventsRequest{
+		Events: []*pb.WatchSyncEvent{
+			favoriteEvent("e1", "series-1", pb.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_UNSPECIFIED, "A Series"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyEvents: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].GetStatus() != pb.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_NO_CHANGE {
+		t.Fatalf("results = %#v, want one NO_CHANGE", resp.Results)
+	}
+	assertNoCall(t, received)
+}
+
+func TestWatchSyncFavoriteRemoveIgnored(t *testing.T) {
+	srv, received := newTestSubextractor(t)
+	_, watch := newWatchRoutes(srv.URL)
+	event := favoriteEvent("e1", "movie-1", pb.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE, "The Movie")
+	event.Operation = pb.WatchSyncOperation_WATCH_SYNC_OPERATION_REMOVE_FAVORITE
+	resp, err := watch.ApplyEvents(context.Background(), &pb.WatchSyncApplyEventsRequest{
+		Events: []*pb.WatchSyncEvent{event},
+	})
+	if err != nil {
+		t.Fatalf("ApplyEvents: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].GetStatus() != pb.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_NO_CHANGE {
+		t.Fatalf("results = %#v, want one NO_CHANGE", resp.Results)
+	}
+	assertNoCall(t, received)
+}
+
+func TestWatchSyncDisabledIgnored(t *testing.T) {
+	srv, received := newTestSubextractor(t)
+	server := &runtimeServer{
+		config: &pluginConfig{
+			SubextractorURL:    srv.URL,
+			SubextractorAPIKey: "test-key",
+			WebhookSecret:      "secret",
+		},
+		disabled: true,
+	}
+	routes := newWebhookRoutes(server)
+	watch := newWatchSyncProvider(routes)
+	resp, err := watch.ApplyEvents(context.Background(), &pb.WatchSyncApplyEventsRequest{
+		Events: []*pb.WatchSyncEvent{
+			favoriteEvent("e1", "movie-1", pb.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE, "The Movie"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyEvents: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].GetStatus() != pb.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_NO_CHANGE {
+		t.Fatalf("results = %#v, want one NO_CHANGE", resp.Results)
+	}
+	assertNoCall(t, received)
+}
+
+func TestWatchSyncFavoriteDedupe(t *testing.T) {
+	release := make(chan struct{})
+	received := make(chan subextractorRequest, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body subextractorRequest
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		received <- body
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	_, watch := newWatchRoutes(srv.URL)
+	if _, err := watch.ApplyEvents(context.Background(), &pb.WatchSyncApplyEventsRequest{
+		Events: []*pb.WatchSyncEvent{
+			favoriteEvent("e1", "dup-1", pb.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE, "Dup"),
+		},
+	}); err != nil {
+		t.Fatalf("first ApplyEvents: %v", err)
+	}
+	// First call is now blocked in the handler, so dup-1 stays in flight.
+	waitForCall(t, received)
+
+	if _, err := watch.ApplyEvents(context.Background(), &pb.WatchSyncApplyEventsRequest{
+		Events: []*pb.WatchSyncEvent{
+			favoriteEvent("e2", "dup-1", pb.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE, "Dup"),
+		},
+	}); err != nil {
+		t.Fatalf("second ApplyEvents: %v", err)
+	}
+	assertNoCall(t, received)
+	close(release)
 }

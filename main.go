@@ -23,6 +23,10 @@ import (
 // webhook_secret).
 const configKey = "subextractor"
 
+// pluginVersion is the release version reported by GET /status. Keep it in
+// sync with manifest.json (the binary embeds that file for the host).
+const pluginVersion = "0.2.0"
+
 //go:embed manifest.json
 var manifestJSON []byte
 
@@ -34,7 +38,18 @@ type runtimeServer struct {
 	runtimedefault.Server
 	configMu sync.Mutex
 	config   *pluginConfig
+	// disabled mirrors the admin "enabled" toggle. The zero value means
+	// enabled, so a runtimeServer constructed without Configure (tests) is
+	// enabled by default.
+	disabled bool
 	manifest *pb.PluginManifest
+}
+
+// isEnabled reports whether the admin enabled toggle is on.
+func (s *runtimeServer) isEnabled() bool {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	return !s.disabled
 }
 
 func (s *runtimeServer) GetManifest(context.Context, *pb.GetManifestRequest) (*pb.GetManifestResponse, error) {
@@ -49,6 +64,9 @@ func (s *runtimeServer) Configure(_ context.Context, request *pb.ConfigureReques
 			continue
 		}
 		values := entry.GetValue().AsMap()
+		// The enabled toggle defaults to true when the field is absent.
+		enabled := boolValue(values["enabled"], true)
+		s.disabled = !enabled
 		cfg := &pluginConfig{
 			SubextractorURL:    stringValue(values["subextractor_url"]),
 			SubextractorAPIKey: stringValue(values["subextractor_api_key"]),
@@ -71,7 +89,17 @@ func (s *runtimeServer) Configure(_ context.Context, request *pb.ConfigureReques
 	}
 	// No subextractor config entry yet — accept so the plugin starts.
 	s.config = nil
+	s.disabled = false
 	return &pb.ConfigureResponse{}, nil
+}
+
+// boolValue coerces a config value to bool, falling back to def when it is not
+// a bool (absent or delivered as a non-boolean JSON scalar).
+func boolValue(v any, def bool) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return def
 }
 
 func stringValue(v any) string {
@@ -133,12 +161,14 @@ func main() {
 
 	runtime := &runtimeServer{manifest: manifest}
 	routes := newWebhookRoutes(runtime)
+	watchSync := newWatchSyncProvider(routes)
 
 	sdkruntime.Serve(sdkruntime.ServeConfig{
 		Logger: hclog.New(&hclog.LoggerOptions{Name: "silo-auto-translate"}),
 		Servers: sdkruntime.CapabilityServers{
-			Runtime:    runtime,
-			HttpRoutes: routes,
+			Runtime:           runtime,
+			HttpRoutes:        routes,
+			WatchSyncProvider: watchSync,
 		},
 	})
 }
