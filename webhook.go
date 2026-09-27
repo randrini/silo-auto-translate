@@ -353,6 +353,12 @@ func (w *webhookRoutes) callSubextractor(cfg *pluginConfig, itemID, title string
 // subextractorEndpoint validates the configured URL and enforces the
 // private-host policy for plain HTTP.
 func subextractorEndpoint(raw string) (string, error) {
+	return subextractorURL(raw, "/api/silo/process")
+}
+
+// subextractorURL validates the configured base URL, enforces the private-host
+// policy for plain HTTP, and appends path to the base path.
+func subextractorURL(raw, path string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return "", errors.New("a valid SubExtractor URL is required (http or https)")
@@ -360,7 +366,7 @@ func subextractorEndpoint(raw string) (string, error) {
 	if u.Scheme == "http" && !isPrivateHost(u.Hostname()) {
 		return "", errors.New("insecure HTTP is allowed only for private/local SubExtractor hosts")
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/api/silo/process"
+	u.Path = strings.TrimRight(u.Path, "/") + path
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String(), nil

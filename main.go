@@ -25,7 +25,7 @@ const configKey = "subextractor"
 
 // pluginVersion is the release version reported by GET /status. Keep it in
 // sync with manifest.json (the binary embeds that file for the host).
-const pluginVersion = "0.2.0"
+const pluginVersion = "0.2.1"
 
 //go:embed manifest.json
 var manifestJSON []byte
@@ -162,6 +162,7 @@ func main() {
 	runtime := &runtimeServer{manifest: manifest}
 	routes := newWebhookRoutes(runtime)
 	watchSync := newWatchSyncProvider(routes)
+	checker := newConnectionChecker(routes)
 
 	sdkruntime.Serve(sdkruntime.ServeConfig{
 		Logger: hclog.New(&hclog.LoggerOptions{Name: "silo-auto-translate"}),
@@ -169,6 +170,7 @@ func main() {
 			Runtime:           runtime,
 			HttpRoutes:        routes,
 			WatchSyncProvider: watchSync,
+			RequestRouter:     checker,
 		},
 	})
 }

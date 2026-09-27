@@ -82,6 +82,23 @@ The `enabled` switch (first field on the admin form, default on) is a master kil
 
 Toggling it does not clear the stored connection, so re-enabling resumes immediately.
 
+### Check Connection
+
+The admin config dialog's **Check Connection** button probes the plugin with the candidate config before you save. To support this, the plugin declares a `request_router.v1` capability (`connection-check`) whose `TestConnection` RPC performs, within a 10-second budget:
+
+1. `GET {subextractor_url}/api/health` — must return 2xx (SubExtractor is up).
+2. `GET {subextractor_url}/api/silo/status` with `Authorization: Bearer {subextractor_api_key}` — must return 200, and the response's `configured` flag is reported back.
+
+The message is one of:
+
+- `SubExtractor reachable (vX.Y.Z); silo integration configured: true` — success. (`vX.Y.Z` comes from the auth-exempt `GET /api/info`; it is omitted if unavailable.)
+- `...; silo integration configured: false (set SILO_URL, SILO_API_KEY and SILO_WEBHOOK_SECRET in SubExtractor)` — reachable but SubExtractor's silo integration is not configured.
+- `SubExtractor rejected the API key (HTTP 401)` — wrong `subextractor_api_key`.
+- `SubExtractor is older than v2.9.0: /api/silo/status is missing (HTTP 404)` — upgrade SubExtractor.
+- `SubExtractor unreachable at <url>: ...` / `SubExtractor health check failed ... (HTTP n)`.
+
+Plain HTTP is only accepted for private/local hosts (same policy as the webhook path). The capability exists solely for this probe and does not route media requests.
+
 ### Full HMAC verification (optional fork patch)
 
 The plugin verifies the full per-delivery HMAC (`X-Silo-Signature`, Stripe `t=,v1=` convention, ±300s) automatically whenever the host forwards the header. The randrini/silo-server fork can enable this by whitelisting the header in `internal/plugins/http_proxy.go`:

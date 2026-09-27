@@ -331,8 +331,8 @@ func TestStatusRequiresAdmin(t *testing.T) {
 	if err := json.Unmarshal(resp2.Body, &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if payload.Version != "0.2.0" || !payload.Configured || !payload.Enabled {
-		t.Fatalf("payload = %#v, want version 0.2.0 configured=true enabled=true", payload)
+	if payload.Version != "0.2.1" || !payload.Configured || !payload.Enabled {
+		t.Fatalf("payload = %#v, want version 0.2.1 configured=true enabled=true", payload)
 	}
 }
 
@@ -574,8 +574,8 @@ func TestStatusReportsDisabled(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if payload.Version != "0.2.0" || !payload.Configured || payload.Enabled {
-		t.Fatalf("payload = %#v, want version 0.2.0 configured=true enabled=false", payload)
+	if payload.Version != "0.2.1" || !payload.Configured || payload.Enabled {
+		t.Fatalf("payload = %#v, want version 0.2.1 configured=true enabled=false", payload)
 	}
 }
 

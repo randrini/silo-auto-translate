@@ -1,6 +1,6 @@
 {
   "plugin_id": "com.randrini.silo-auto-translate",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "silo_api_version": "v1",
   "capabilities": [
     {
@@ -25,6 +25,12 @@
         ],
         "max_batch_size": 25
       }
+    },
+    {
+      "type": "request_router.v1",
+      "id": "connection-check",
+      "display_name": "Auto Translate Connection Check",
+      "description": "Backs the Check Connection button: probes SubExtractor /api/health and /api/silo/status with the candidate config."
     }
   ],
   "http_routes": [
