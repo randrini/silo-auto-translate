@@ -98,6 +98,85 @@ def compare_semver(v1: str, v2: str) -> str:
     return "EQUAL"
 
 
+# Proto enum name -> number maps used to make the embedded catalog manifest
+# decodable by the host. The host reads catalog manifests with encoding/json
+# (strict) into the SDK's generated Go structs, where enum fields are int32 —
+# a proto enum *name* string fails to unmarshal. Keep these in sync with
+# proto/silo/plugin/v1/watch_sync_provider.proto and common.proto.
+WATCH_SYNC_AUTH_METHODS = {
+    "WATCH_SYNC_AUTH_METHOD_UNSPECIFIED": 0,
+    "WATCH_SYNC_AUTH_METHOD_AUTHORIZATION_CODE": 1,
+    "WATCH_SYNC_AUTH_METHOD_API_KEY": 2,
+    "WATCH_SYNC_AUTH_METHOD_DEVICE_CODE": 3,
+}
+
+WATCH_SYNC_MEDIA_TYPES = {
+    "WATCH_SYNC_MEDIA_TYPE_UNSPECIFIED": 0,
+    "WATCH_SYNC_MEDIA_TYPE_MOVIE": 1,
+    "WATCH_SYNC_MEDIA_TYPE_EPISODE": 2,
+}
+
+ADMIN_FORM_CONTROLS = {
+    "ADMIN_FORM_CONTROL_UNSPECIFIED": 0,
+    "ADMIN_FORM_CONTROL_TEXT": 1,
+    "ADMIN_FORM_CONTROL_TEXTAREA": 2,
+    "ADMIN_FORM_CONTROL_PASSWORD": 3,
+    "ADMIN_FORM_CONTROL_NUMBER": 4,
+    "ADMIN_FORM_CONTROL_SWITCH": 5,
+    "ADMIN_FORM_CONTROL_SELECT": 6,
+    "ADMIN_FORM_CONTROL_MULTI_SELECT": 7,
+}
+
+
+def normalize_enum_list(values, mapping: dict[str, int], field: str) -> list:
+    """Coerce a list of proto enum names (or ints) to numeric enum values."""
+    normalized = []
+    for value in values:
+        if isinstance(value, bool):
+            raise ValueError(f"{field}: boolean is not a valid enum value: {value!r}")
+        if isinstance(value, int):
+            normalized.append(value)
+            continue
+        if isinstance(value, str):
+            if value not in mapping:
+                raise ValueError(f"{field}: unknown enum value {value!r}")
+            normalized.append(mapping[value])
+            continue
+        raise ValueError(f"{field}: invalid enum value {value!r}")
+    return normalized
+
+
+def normalize_manifest_enums(manifest: dict) -> None:
+    """Convert proto enum names to their numeric values in-place.
+
+    The host decodes the catalog manifest with encoding/json into the SDK's
+    Go structs, so every int32 enum field must be numeric. Only enum-typed
+    fields need rewriting; string fields (http route access/navigation_kind,
+    platform os/arch, presentation URLs, ...) are left untouched.
+    """
+    for cap in manifest.get("capabilities", []) or []:
+        watch_sync = cap.get("watch_sync_provider")
+        if isinstance(watch_sync, dict):
+            for field, mapping in (
+                ("auth_methods", WATCH_SYNC_AUTH_METHODS),
+                ("supported_media_types", WATCH_SYNC_MEDIA_TYPES),
+            ):
+                values = watch_sync.get(field)
+                if isinstance(values, list):
+                    watch_sync[field] = normalize_enum_list(values, mapping, field)
+
+    for schema in manifest.get("global_config_schema", []) or []:
+        admin_form = schema.get("admin_form")
+        if not isinstance(admin_form, dict):
+            continue
+        for field in admin_form.get("fields", []) or []:
+            control = field.get("control")
+            if isinstance(control, str):
+                if control not in ADMIN_FORM_CONTROLS:
+                    raise ValueError(f"admin_form control: unknown enum value {control!r}")
+                field["control"] = ADMIN_FORM_CONTROLS[control]
+
+
 def update_catalog_json(catalog_path: str, tag: str, hashes: dict[str, str]) -> None:
     with open(catalog_path, "r", encoding="utf-8") as f:
         catalog = json.load(f)
@@ -108,7 +187,7 @@ def update_catalog_json(catalog_path: str, tag: str, hashes: dict[str, str]) -> 
     # Re-embed the repo's current manifest.json so the catalog always carries
     # the exact manifest shipped in the release binary (routes, capabilities,
     # config schema, presentation). Only the catalog-specific normalization
-    # below (admin_form control strings -> numeric enum ints) is applied.
+    # below (proto enum name strings -> numeric enum ints) is applied.
     catalog_dir = os.path.dirname(os.path.abspath(catalog_path))
     manifest_path = os.path.join(catalog_dir, "manifest.json")
     if not os.path.isfile(manifest_path):
@@ -135,24 +214,11 @@ def update_catalog_json(catalog_path: str, tag: str, hashes: dict[str, str]) -> 
     }
     plugin["binaries"] = binaries
 
-    # Normalize admin form control enum strings to numbers if needed.
-    for cap in plugin.get("manifest", {}).get("global_config_schema", []):
-        admin_form = cap.get("admin_form")
-        if isinstance(admin_form, dict):
-            for field in admin_form.get("fields", []):
-                ctrl = field.get("control")
-                if isinstance(ctrl, str):
-                    ctrl_map = {
-                        "ADMIN_FORM_CONTROL_UNSPECIFIED": 0,
-                        "ADMIN_FORM_CONTROL_TEXT": 1,
-                        "ADMIN_FORM_CONTROL_TEXTAREA": 2,
-                        "ADMIN_FORM_CONTROL_PASSWORD": 3,
-                        "ADMIN_FORM_CONTROL_NUMBER": 4,
-                        "ADMIN_FORM_CONTROL_SWITCH": 5,
-                        "ADMIN_FORM_CONTROL_SELECT": 6,
-                        "ADMIN_FORM_CONTROL_MULTI_SELECT": 7,
-                    }
-                    field["control"] = ctrl_map.get(ctrl, 0)
+    # The host decodes the embedded catalog manifest with encoding/json
+    # (strict) into the SDK's generated Go structs, so every proto enum field
+    # must be numeric — a proto enum *name* string fails to unmarshal and the
+    # whole repository is skipped. Normalize all enum-typed fields.
+    normalize_manifest_enums(plugin["manifest"])
 
     with open(catalog_path, "w", encoding="utf-8") as f:
         json.dump(catalog, f, indent=2)

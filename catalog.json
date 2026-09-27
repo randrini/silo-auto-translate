@@ -19,12 +19,12 @@
             "description": "Triggers SubExtractor when a profile favorites a movie or episode.",
             "watch_sync_provider": {
               "auth_methods": [
-                "WATCH_SYNC_AUTH_METHOD_API_KEY"
+                2
               ],
               "export_favorites": true,
               "supported_media_types": [
-                "WATCH_SYNC_MEDIA_TYPE_MOVIE",
-                "WATCH_SYNC_MEDIA_TYPE_EPISODE"
+                1,
+                2
               ],
               "max_batch_size": 25
             }
